@@ -1,0 +1,281 @@
+From 9bf564b6c69022008661c11b4e94bd7e0f7af263 Mon Sep 17 00:00:00 2001
+From: Folia Contributors <noreply@folia.dev>
+Date: Wed, 2 Sep 2026 19:32:00 +0700
+Subject: [PATCH] Add client chunk cache distance
+
+---
+ .../player/RegionizedPlayerChunkLoader.java   | 69 ++++++++++++++-----
+ .../server/dedicated/DedicatedPlayerList.java |  1 +
+ .../server/dedicated/DedicatedServer.java     |  6 ++
+ .../dedicated/DedicatedServerProperties.java  |  5 ++
+ net/minecraft/server/players/PlayerList.java  | 11 +++
+ 5 files changed, 76 insertions(+), 16 deletions(-)
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
+index 7129c5e..fe44b13 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
+@@ -340,11 +340,15 @@ public final class RegionizedPlayerChunkLoader {
+ 
+         private int lastSentChunkRadius = Integer.MIN_VALUE;
+         private int lastSentSimulationDistance = Integer.MIN_VALUE;
++        private int lastClientCacheDistance = Integer.MIN_VALUE; // Folia - client chunk cache distance
+ 
+         private boolean canGenerateChunks = true;
+ 
+         private final ArrayDeque<ChunkHolderManager.TicketOperation<?, ?>> delayedTicketOps = new ArrayDeque<>();
+         private final LongOpenHashSet sentChunks = new LongOpenHashSet();
++        // These chunks may remain on the client after the player has stopped tracking them.
++        // They deliberately do not keep a player chunk ticket.
++        private final LongOpenHashSet clientCachedChunks = new LongOpenHashSet(); // Folia - client chunk cache distance
+ 
+         private static final byte CHUNK_TICKET_STAGE_NONE           = 0;
+         private static final byte CHUNK_TICKET_STAGE_LOADING        = 1;
+@@ -415,6 +419,7 @@ public final class RegionizedPlayerChunkLoader {
+ 
+         private void sendChunk(final int chunkX, final int chunkZ) {
+             if (this.sentChunks.add(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
++                this.clientCachedChunks.add(CoordinateUtils.getChunkKey(chunkX, chunkZ)); // Folia - client chunk cache distance
+                 ((ChunkSystemChunkHolder)((ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().chunkHolderManager
+                         .getChunkHolder(chunkX, chunkZ).vanillaChunkHolder).moonrise$addReceivedChunk(this.player);
+ 
+@@ -427,19 +432,22 @@ public final class RegionizedPlayerChunkLoader {
+             throw new IllegalStateException();
+         }
+ 
+-        private void sendUnloadChunk(final int chunkX, final int chunkZ) {
++        // Folia start - client chunk cache distance
++        private void stopTrackingChunk(final int chunkX, final int chunkZ) {
+             if (!this.sentChunks.remove(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
+                 return;
+             }
+-            this.sendUnloadChunkRaw(chunkX, chunkZ);
+-        }
+-
+-        private void sendUnloadChunkRaw(final int chunkX, final int chunkZ) {
+             PlatformHooks.get().onChunkUnWatch(this.world, new ChunkPos(chunkX, chunkZ), this.player);
+-            // Note: Check PlayerChunkSender#dropChunk for other logic
+-            // Note: drop isAlive() check so that chunks properly unload client-side when the player dies
+             ((ChunkSystemChunkHolder)((ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().chunkHolderManager
+                 .getChunkHolder(chunkX, chunkZ).vanillaChunkHolder).moonrise$removeReceivedChunk(this.player);
++        }
++
++        private void forgetClientCachedChunk(final int chunkX, final int chunkZ) {
++            this.stopTrackingChunk(chunkX, chunkZ);
++            if (!this.clientCachedChunks.remove(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
++                return;
++            }
++
+             this.player.connection.send(new ClientboundForgetLevelChunkPacket(new ChunkPos(chunkX, chunkZ)));
+             // Paper start - PlayerChunkUnloadEvent
+             if (io.papermc.paper.event.packet.PlayerChunkUnloadEvent.getHandlerList().getRegisteredListeners().length > 0) {
+@@ -447,6 +455,7 @@ public final class RegionizedPlayerChunkLoader {
+             }
+             // Paper end - PlayerChunkUnloadEvent
+         }
++        // Folia end - client chunk cache distance
+ 
+         private final SingleUserAreaMap<PlayerChunkLoaderData> broadcastMap = new SingleUserAreaMap<>(this) {
+             @Override
+@@ -456,7 +465,18 @@ public final class RegionizedPlayerChunkLoader {
+ 
+             @Override
+             protected void removeCallback(final PlayerChunkLoaderData parameter, final int chunkX, final int chunkZ) {
+-                parameter.sendUnloadChunk(chunkX, chunkZ);
++                parameter.stopTrackingChunk(chunkX, chunkZ); // Folia - client chunk cache distance
++            }
++        };
++        private final SingleUserAreaMap<PlayerChunkLoaderData> clientCacheMap = new SingleUserAreaMap<>(this) {
++            @Override
++            protected void addCallback(final PlayerChunkLoaderData parameter, final int chunkX, final int chunkZ) {
++                // do nothing, we only care about remove
++            }
++
++            @Override
++            protected void removeCallback(final PlayerChunkLoaderData parameter, final int chunkX, final int chunkZ) {
++                parameter.forgetClientCachedChunk(chunkX, chunkZ);
+             }
+         };
+         private final SingleUserAreaMap<PlayerChunkLoaderData> loadTicketCleanup = new SingleUserAreaMap<>(this) {
+@@ -521,6 +541,17 @@ public final class RegionizedPlayerChunkLoader {
+             return vd == null ? -1 : Math.max(0, vd.intValue());
+         }
+ 
++        // Folia start - client chunk cache distance
++        private int getClientChunkCacheDistance(final int sendViewDistance, final int clientViewDistance) {
++            final int configuredDistance = this.world.getServer().getPlayerList().getClientChunkCacheDistance();
++            if (configuredDistance < 0) {
++                return sendViewDistance;
++            }
++            final int clientLimitedDistance = clientViewDistance < 0 ? configuredDistance : Math.min(configuredDistance, clientViewDistance);
++            return Math.max(sendViewDistance, clientLimitedDistance);
++        }
++        // Folia end - client chunk cache distance
++
+         private static int getTickDistance(final int playerTickViewDistance, final int worldTickViewDistance,
+                                            final int playerLoadViewDistance, final int worldLoadViewDistance) {
+             return Math.min(
+@@ -871,13 +902,15 @@ public final class RegionizedPlayerChunkLoader {
+             // send view cannot be greater-than load view
+             final int clientViewDistance = getClientViewDistance(this.player);
+             final int sendViewDistance = getSendViewDistance(loadViewDistance, clientViewDistance, playerDistances.sendViewDistance, worldDistances.sendViewDistance);
++            final int clientCacheDistance = this.getClientChunkCacheDistance(sendViewDistance, clientViewDistance); // Folia - client chunk cache distance
+ 
+             // send view distances
+-            this.player.connection.send(this.updateClientChunkRadius(sendViewDistance));
++            this.player.connection.send(this.updateClientChunkRadius(clientCacheDistance)); // Folia - client chunk cache distance
+             this.player.connection.send(this.updateClientSimulationDistance(tickViewDistance));
+ 
+             // add to distance maps
+             this.broadcastMap.add(chunkX, chunkZ, sendViewDistance + 1);
++            this.clientCacheMap.add(chunkX, chunkZ, clientCacheDistance + 1); // Folia - client chunk cache distance
+             this.loadTicketCleanup.add(chunkX, chunkZ, loadViewDistance + 1);
+             this.tickMap.add(chunkX, chunkZ, tickViewDistance);
+ 
+@@ -924,6 +957,7 @@ public final class RegionizedPlayerChunkLoader {
+             // send view cannot be greater-than load view
+             final int clientViewDistance = getClientViewDistance(this.player);
+             final int sendViewDistance = getSendViewDistance(loadViewDistance, clientViewDistance, playerDistances.sendViewDistance, worldDistances.sendViewDistance);
++            final int clientCacheDistance = this.getClientChunkCacheDistance(sendViewDistance, clientViewDistance); // Folia - client chunk cache distance
+ 
+             final ChunkPos playerPos = this.player.chunkPosition();
+             final boolean canGenerateChunks = this.canPlayerGenerateChunks();
+@@ -938,6 +972,7 @@ public final class RegionizedPlayerChunkLoader {
+                 sendViewDistance == this.lastSendDistance
+                     && loadViewDistance == this.lastLoadDistance
+                     && tickViewDistance == this.lastTickDistance
++                    && clientCacheDistance == this.lastClientCacheDistance
+ 
+                     // has our chunk stayed the same?
+                     && prevChunkX == currentChunkX
+@@ -952,6 +987,7 @@ public final class RegionizedPlayerChunkLoader {
+ 
+             // update distance maps
+             this.broadcastMap.update(currentChunkX, currentChunkZ, sendViewDistance + 1);
++            this.clientCacheMap.update(currentChunkX, currentChunkZ, clientCacheDistance + 1); // Folia - client chunk cache distance
+             this.loadTicketCleanup.update(currentChunkX, currentChunkZ, loadViewDistance + 1);
+             this.tickMap.update(currentChunkX, currentChunkZ, tickViewDistance);
+             if (sendViewDistance > loadViewDistance || tickViewDistance > loadViewDistance) {
+@@ -960,8 +996,8 @@ public final class RegionizedPlayerChunkLoader {
+ 
+             // update VDs for client
+             // this should be after the distance map updates, as they will send unload packets
+-            if (this.lastSentChunkRadius != sendViewDistance) {
+-                this.player.connection.send(this.updateClientChunkRadius(sendViewDistance));
++            if (this.lastSentChunkRadius != clientCacheDistance) {
++                this.player.connection.send(this.updateClientChunkRadius(clientCacheDistance));
+             }
+             if (this.lastSentSimulationDistance != tickViewDistance) {
+                 this.player.connection.send(this.updateClientSimulationDistance(tickViewDistance));
+@@ -979,6 +1015,7 @@ public final class RegionizedPlayerChunkLoader {
+             this.lastSendDistance = sendViewDistance;
+             this.lastLoadDistance = loadViewDistance;
+             this.lastTickDistance = tickViewDistance;
++            this.lastClientCacheDistance = clientCacheDistance; // Folia - client chunk cache distance
+             this.canGenerateChunks = canGenerateChunks;
+ 
+             // +1 since we need to load chunks +1 around the load view distance...
+@@ -1000,12 +1037,11 @@ public final class RegionizedPlayerChunkLoader {
+                 // the dist <= view check
+                 final boolean sendChunk = (squareDistance <= (sendViewDistance + 1))
+                     && wantChunkLoaded(currentChunkX, currentChunkZ, chunkX, chunkZ, sendViewDistance);
+-                final boolean sentChunk = sendChunk ? this.sentChunks.contains(chunk) : this.sentChunks.remove(chunk);
++                final boolean sentChunk = this.sentChunks.contains(chunk); // Folia - client chunk cache distance
+ 
+                 if (!sendChunk && sentChunk) {
+-                    // have sent the chunk, but don't want it anymore
+-                    // unload it now
+-                    this.sendUnloadChunkRaw(chunkX, chunkZ);
++                    // Stop tracking outside the normal send distance but retain the client-side visual cache.
++                    this.stopTrackingChunk(chunkX, chunkZ); // Folia - client chunk cache distance
+                 }
+ 
+                 final byte stage = this.chunkTicketStage.get(chunk);
+@@ -1065,8 +1101,9 @@ public final class RegionizedPlayerChunkLoader {
+                 throw new IllegalStateException("Removing removed player chunk loader");
+             }
+             this.removed = true;
+-            // sends the chunk unload packets
++            // Stop tracking active chunks, then clear the client cache.
+             this.broadcastMap.remove();
++            this.clientCacheMap.remove(); // Folia - client chunk cache distance
+             // cleans up loading/generating tickets
+             this.loadTicketCleanup.remove();
+             // cleans up ticking tickets
+diff --git a/net/minecraft/server/dedicated/DedicatedPlayerList.java b/net/minecraft/server/dedicated/DedicatedPlayerList.java
+index f7f4060..db5c363 100644
+--- a/net/minecraft/server/dedicated/DedicatedPlayerList.java
++++ b/net/minecraft/server/dedicated/DedicatedPlayerList.java
+@@ -16,6 +16,7 @@ public class DedicatedPlayerList extends PlayerList {
+         super(server, registries, playerIo, server.notificationManager());
+         this.setViewDistance(server.viewDistance());
+         this.setSimulationDistance(server.simulationDistance());
++        this.setClientChunkCacheDistance(server.clientChunkCacheDistance()); // Folia - client chunk cache distance
+         // Paper start - fix converting txt to json file; moved from constructor
+     }
+     @Override
+diff --git a/net/minecraft/server/dedicated/DedicatedServer.java b/net/minecraft/server/dedicated/DedicatedServer.java
+index eb06d8f..07f1aa1 100644
+--- a/net/minecraft/server/dedicated/DedicatedServer.java
++++ b/net/minecraft/server/dedicated/DedicatedServer.java
+@@ -485,6 +485,12 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+         return this.settings.getProperties().simulationDistance.get();
+     }
+ 
++    // Folia start - client chunk cache distance
++    public int clientChunkCacheDistance() {
++        return this.settings.getProperties().clientChunkCacheDistance;
++    }
++    // Folia end - client chunk cache distance
++
+     public void setSimulationDistance(int simulationDistance) {
+         this.settings.update(dedicatedServerProperties -> dedicatedServerProperties.simulationDistance.update(this.registryAccess(), simulationDistance));
+         this.getPlayerList().setSimulationDistance(simulationDistance);
+diff --git a/net/minecraft/server/dedicated/DedicatedServerProperties.java b/net/minecraft/server/dedicated/DedicatedServerProperties.java
+index bbd8f68..b1f5f0c 100644
+--- a/net/minecraft/server/dedicated/DedicatedServerProperties.java
++++ b/net/minecraft/server/dedicated/DedicatedServerProperties.java
+@@ -102,6 +102,11 @@ public class DedicatedServerProperties extends Settings<DedicatedServerPropertie
+     public final int rateLimitPacketsPerSecond = this.get("rate-limit", 0);
+     public final Settings<DedicatedServerProperties>.MutableValue<Integer> viewDistance = this.getMutable("view-distance", 10);
+     public final Settings<DedicatedServerProperties>.MutableValue<Integer> simulationDistance = this.getMutable("simulation-distance", 10);
++    // Folia start - client chunk cache distance
++    // This only controls how long the client retains chunks which have left the normal send distance.
++    // It does not increase loading, generation, or simulation distance.
++    public final int clientChunkCacheDistance = this.get("client-chunk-cache-distance", property -> Mth.clamp(property, -1, 32), -1);
++    // Folia end - client chunk cache distance
+     public final Settings<DedicatedServerProperties>.MutableValue<Integer> maxPlayers = this.getMutable("max-players", 20);
+     public final int networkCompressionThreshold = this.get("network-compression-threshold", 256);
+     public final boolean broadcastRconToOps = this.get("broadcast-rcon-to-ops", true);
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 989ac56..0f6b838 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -128,6 +128,7 @@ public abstract class PlayerList {
+     private final LayeredRegistryAccess<RegistryLayer> registries;
+     private int viewDistance;
+     private int simulationDistance;
++    private int clientChunkCacheDistance = -1; // Folia - client chunk cache distance
+     private boolean allowCommandsForAllPlayers;
+     private int sendAllPlayerInfoIn;
+ 
+@@ -1056,6 +1057,16 @@ public abstract class PlayerList {
+         return this.simulationDistance;
+     }
+ 
++    // Folia start - client chunk cache distance
++    public int getClientChunkCacheDistance() {
++        return this.clientChunkCacheDistance;
++    }
++
++    public void setClientChunkCacheDistance(final int clientChunkCacheDistance) {
++        this.clientChunkCacheDistance = clientChunkCacheDistance;
++    }
++    // Folia end - client chunk cache distance
++
+     public MinecraftServer getServer() {
+         return this.server;
+     }
+-- 
+2.45.1.windows.1
+
