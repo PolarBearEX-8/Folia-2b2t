@@ -1,4 +1,18 @@
-# Folia 2b2t 1.21.11-2
+# Folia 2b2t 1.21.11-3
+
+## Ender Pearl Stasis
+
+This release adds an idempotent Ender Pearl ticket reapply after a pearl returns to the loaded state. It also loads `config/2b2tfolia.yml` automatically during server startup.
+
+The following keys control the fork patch:
+
+```yaml
+ender-pearl-stasis:
+  enabled: true
+  reapply-ticket-on-loaded-transition: true
+```
+
+The release includes a regression-test procedure for remote stasis chambers, multiple pearls in one chunk, and cross-region cases.
 
 ## Client Chunk Cache Distance
 
@@ -25,4 +39,4 @@ client-chunk-cache-distance=12
 
 ## Download
 
-Use `folia-paperclip-1.21.11-R0.1-SNAPSHOT-mojmap.jar` from the GitHub release assets.
+Use the attached Paperclip JAR from the GitHub release assets.
