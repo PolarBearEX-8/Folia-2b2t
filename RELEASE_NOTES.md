@@ -1,4 +1,4 @@
-# Folia 2b2t 1.21.11-1
+# Folia 2b2t 1.21.11-2
 
 ## Client Chunk Cache Distance
 
@@ -14,7 +14,7 @@ simulation-distance=6
 client-chunk-cache-distance=12
 ```
 
-`client-chunk-cache-distance` defaults to `-1`, which disables the feature and preserves the normal vanilla/Paper behaviour. Restart the server after changing this setting.
+`client-chunk-cache-distance` accepts values from `-1` to `128`; `-1` is the default and disables the feature, preserving normal vanilla/Paper behaviour. Restart the server after changing this setting.
 
 ## Behaviour
 
