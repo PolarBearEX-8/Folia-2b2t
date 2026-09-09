@@ -1,8 +1,8 @@
-# Folia 2b2t 1.21.11-3
+# Folia 2b2t 1.21.11-4
 
 ## Ender Pearl Stasis
 
-This release adds an idempotent Ender Pearl ticket reapply after a pearl returns to the loaded state. It also loads `config/2b2tfolia.yml` automatically during server startup.
+This release keeps stasis pearls ticketed whenever `ender-pearl-stasis.enabled` is true, even when PlatformHooks does not request a pearl ticket. This prevents a remote stasis chamber from unloading and stops its pearl from ceasing to tick. Legacy Ender Pearl behavior remains excluded.
 
 The following keys control the fork patch:
 
@@ -13,6 +13,15 @@ ender-pearl-stasis:
 ```
 
 The release includes a regression-test procedure for remote stasis chambers, multiple pearls in one chunk, and cross-region cases.
+
+## Performance Boss Bars
+
+Players can enable their own real-time status bars:
+
+- `/ftpsbar [on|off]` shows median TPS, MSPT, and worst MSPT.
+- `/frambar [on|off]` shows JVM memory usage.
+
+Both bars refresh once per second and can be toggled independently.
 
 ## Client Chunk Cache Distance
 

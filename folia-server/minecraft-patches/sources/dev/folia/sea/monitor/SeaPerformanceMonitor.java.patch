@@ -1,0 +1,194 @@
+--- /dev/null
++++ b/dev/folia/sea/monitor/SeaPerformanceMonitor.java
+@@ -1,0 +_,217 @@
++package dev.folia.sea.monitor;
++
++import io.papermc.paper.threadedregions.commands.CommandUtil;
++import net.kyori.adventure.bossbar.BossBar;
++import net.kyori.adventure.bossbar.BossBar.Color;
++import net.kyori.adventure.bossbar.BossBar.Overlay;
++import net.kyori.adventure.text.Component;
++import net.kyori.adventure.text.format.NamedTextColor;
++import net.kyori.adventure.text.format.TextColor;
++import org.bukkit.Bukkit;
++import org.bukkit.World;
++import org.bukkit.craftbukkit.CraftWorld;
++import org.bukkit.entity.Player;
++
++import java.text.DecimalFormat;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import java.util.UUID;
++import java.util.concurrent.ConcurrentHashMap;
++
++/**
++ * Real-time TPS/MSPT and RAM boss bars for players that enable them.
++ */
++public final class SeaPerformanceMonitor {
++
++    private static final Map<UUID, BossBar> TPS_BAR_USERS = new ConcurrentHashMap<>();
++    private static final Map<UUID, BossBar> RAM_BAR_USERS = new ConcurrentHashMap<>();
++
++    private static final DecimalFormat TWO_DEC = new DecimalFormat("#,##0.00");
++    private static long tickCount;
++
++    private SeaPerformanceMonitor() {
++    }
++
++    public static boolean isTpsBarEnabled(final UUID uuid) {
++        return TPS_BAR_USERS.containsKey(uuid);
++    }
++
++    public static boolean isRamBarEnabled(final UUID uuid) {
++        return RAM_BAR_USERS.containsKey(uuid);
++    }
++
++    public static void setTpsBarEnabled(final UUID uuid, final boolean enabled) {
++        setBarEnabled(TPS_BAR_USERS, uuid, enabled);
++    }
++
++    public static void setRamBarEnabled(final UUID uuid, final boolean enabled) {
++        setBarEnabled(RAM_BAR_USERS, uuid, enabled);
++    }
++
++    private static void setBarEnabled(final Map<UUID, BossBar> bars, final UUID uuid, final boolean enabled) {
++        if (enabled) {
++            bars.computeIfAbsent(uuid, ignored -> BossBar.bossBar(Component.empty(), 0.0f, Color.GREEN, Overlay.PROGRESS));
++        } else {
++            final BossBar bar = bars.remove(uuid);
++            final Player player = Bukkit.getPlayer(uuid);
++            if (bar != null && player != null) {
++                player.hideBossBar(bar);
++            }
++        }
++    }
++
++    /**
++     * Invoked on the global region tick; actual refreshes run at 1 Hz.
++     */
++    public static void tick() {
++        if ((++tickCount % 20) != 0 || (TPS_BAR_USERS.isEmpty() && RAM_BAR_USERS.isEmpty())) {
++            return;
++        }
++
++        final TpsSnapshot tps = computeServerTps(System.nanoTime());
++        if (!TPS_BAR_USERS.isEmpty()) {
++            pushTpsBars(tps);
++        }
++        if (!RAM_BAR_USERS.isEmpty()) {
++            final Runtime runtime = Runtime.getRuntime();
++            final long usedMb = (runtime.totalMemory() - runtime.freeMemory()) >> 20;
++            final long maxMb = Math.max(usedMb, runtime.maxMemory() >> 20);
++            pushRamBars(usedMb, maxMb, (int) (maxMb == 0 ? 0 : usedMb * 100.0 / maxMb));
++        }
++    }
++
++    private static void pushTpsBars(final TpsSnapshot tps) {
++        final Component title = Component.text()
++            .append(Component.text("TPS ", NamedTextColor.DARK_GRAY))
++            .append(Component.text(TWO_DEC.format(tps.medianTps), CommandUtil.getColourForTPS(tps.medianTps)))
++            .append(Component.text("  MSPT ", NamedTextColor.DARK_GRAY))
++            .append(Component.text(TWO_DEC.format(tps.mspt), CommandUtil.getColourForMSPT(tps.mspt)))
++            .append(Component.text("  Worst ", NamedTextColor.DARK_GRAY))
++            .append(Component.text(TWO_DEC.format(tps.worstMspt), CommandUtil.getColourForMSPT(tps.worstMspt)))
++            .build();
++        final float progress = (float) Math.max(0.0, Math.min(tps.medianTps / 20.0, 1.0));
++        final Color colour = tps.medianTps >= 18.0 ? Color.GREEN : tps.medianTps >= 10.0 ? Color.YELLOW : Color.RED;
++
++        updateBars(TPS_BAR_USERS, title, progress, colour);
++    }
++
++    private static void pushRamBars(final long usedMb, final long maxMb, final int percent) {
++        final TextColor textColour = colourForPercent(percent);
++        final Component title = Component.text()
++            .append(Component.text("RAM ", NamedTextColor.DARK_GRAY))
++            .append(Component.text(usedMb + "MB", textColour))
++            .append(Component.text(" / ", NamedTextColor.DARK_GRAY))
++            .append(Component.text(maxMb + "MB", NamedTextColor.AQUA))
++            .append(Component.text(" (", NamedTextColor.DARK_GRAY))
++            .append(Component.text(percent + "%", textColour))
++            .append(Component.text(")", NamedTextColor.DARK_GRAY))
++            .build();
++        final float progress = (float) Math.max(0.0, Math.min(percent / 100.0, 1.0));
++        final Color colour = percent >= 85 ? Color.RED : percent >= 70 ? Color.YELLOW : Color.GREEN;
++
++        updateBars(RAM_BAR_USERS, title, progress, colour);
++    }
++
++    private static void updateBars(final Map<UUID, BossBar> bars, final Component title, final float progress, final Color colour) {
++        for (final Map.Entry<UUID, BossBar> entry : bars.entrySet()) {
++            final Player player = Bukkit.getPlayer(entry.getKey());
++            if (player == null) {
++                bars.remove(entry.getKey(), entry.getValue());
++                continue;
++            }
++            final BossBar bar = entry.getValue();
++            if (!hasBossBar(player, bar)) {
++                player.showBossBar(bar);
++            }
++            bar.name(title);
++            bar.progress(progress);
++            bar.color(colour);
++        }
++    }
++
++    private static boolean hasBossBar(final Player player, final BossBar bar) {
++        for (final BossBar active : player.activeBossBars()) {
++            if (active == bar) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private static TextColor colourForPercent(final int percent) {
++        if (percent >= 95) {
++            return NamedTextColor.DARK_RED;
++        }
++        if (percent >= 85) {
++            return NamedTextColor.RED;
++        }
++        if (percent >= 70) {
++            return NamedTextColor.GOLD;
++        }
++        if (percent >= 50) {
++            return NamedTextColor.YELLOW;
++        }
++        return NamedTextColor.GREEN;
++    }
++
++    private record TpsSnapshot(double medianTps, double mspt, double worstMspt) {
++    }
++
++    private static TpsSnapshot computeServerTps(final long now) {
++        final double[] worstMspt = {0.0};
++        final List<Double> tpsPerRegion = new ArrayList<>();
++        final List<Double> msptPerRegion = new ArrayList<>();
++
++        for (final World bukkitWorld : Bukkit.getWorlds()) {
++            final net.minecraft.server.level.ServerLevel world = ((CraftWorld) bukkitWorld).getHandle();
++            world.regioniser.computeForAllRegions(region -> {
++                final var report = region.getData().getRegionSchedulingHandle().getTickReport15s(now);
++                if (report != null) {
++                    tpsPerRegion.add(report.tpsData().segmentAll().average());
++                    final double mspt = report.timePerTickData().segmentAll().average() / 1.0E6;
++                    msptPerRegion.add(mspt);
++                    worstMspt[0] = Math.max(worstMspt[0], mspt);
++                }
++            });
++        }
++
++        if (tpsPerRegion.isEmpty()) {
++            return new TpsSnapshot(20.0, 0.0, 0.0);
++        }
++        return new TpsSnapshot(median(tpsPerRegion), median(msptPerRegion), worstMspt[0]);
++    }
++
++    private static double median(final List<Double> values) {
++        final List<Double> sorted = new ArrayList<>(values);
++        sorted.sort(Double::compare);
++        final int middle = sorted.size() >> 1;
++        return (sorted.size() & 1) == 0 ? (sorted.get(middle - 1) + sorted.get(middle)) / 2.0 : sorted.get(middle);
++    }
++}

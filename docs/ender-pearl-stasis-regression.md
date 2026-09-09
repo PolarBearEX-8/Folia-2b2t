@@ -1,6 +1,6 @@
 # Ender Pearl Stasis Regression Test
 
-Use a fresh test world and the NewSV profile in `config/2b2tfolia.yml`.
+Use a fresh test world with Ender Pearl stasis enabled in `config/2b2tfolia.yml`.
 
 1. Create a bubble-column stasis chamber at least 13 chunks from the test player. Throw one Ender Pearl into it and record its entity UUID with `/data get entity` while standing nearby.
 2. Leave until the chamber is outside the 12-chunk view distance and wait at least 90 seconds. Do not keep the chamber loaded with a player, portal, or plugin ticket.

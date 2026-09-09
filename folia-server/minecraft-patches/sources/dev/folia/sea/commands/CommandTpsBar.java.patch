@@ -1,0 +1,62 @@
+--- /dev/null
++++ b/dev/folia/sea/commands/CommandTpsBar.java
+@@ -1,0 +_,59 @@
++package dev.folia.sea.commands;
++
++import dev.folia.sea.monitor.SeaPerformanceMonitor;
++import net.kyori.adventure.text.Component;
++import net.kyori.adventure.text.format.NamedTextColor;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++import org.bukkit.entity.Player;
++
++import java.util.Arrays;
++import java.util.List;
++
++public final class CommandTpsBar extends Command {
++
++    public CommandTpsBar() {
++        super("ftpsbar", "Toggles the real-time TPS/MSPT boss bar", "/ftpsbar [on|off]", Arrays.asList("tps-meter", "tpsmeter"));
++        this.setPermission(null);
++    }
++
++    @Override
++    public boolean execute(final CommandSender sender, final String commandLabel, final String[] args) {
++        if (!(sender instanceof Player player)) {
++            sender.sendMessage(Component.text("Only players can use /ftpsbar", NamedTextColor.RED));
++            return true;
++        }
++
++        final Boolean enabled = resolveState(args, SeaPerformanceMonitor.isTpsBarEnabled(player.getUniqueId()));
++        if (enabled == null) {
++            sender.sendMessage(Component.text("Usage: /ftpsbar [on|off]", NamedTextColor.RED));
++            return true;
++        }
++
++        SeaPerformanceMonitor.setTpsBarEnabled(player.getUniqueId(), enabled);
++        player.sendActionBar(Component.text(enabled ? "TPS bar enabled" : "TPS bar disabled",
++                enabled ? NamedTextColor.GREEN : NamedTextColor.RED));
++        return true;
++    }
++
++    static Boolean resolveState(final String[] args, final boolean current) {
++        if (args.length == 0) {
++            return !current;
++        }
++        if (args[0].equalsIgnoreCase("on")) {
++            return true;
++        }
++        if (args[0].equalsIgnoreCase("off")) {
++            return false;
++        }
++        return null;
++    }
++
++    @Override
++    public List<String> tabComplete(final CommandSender sender, final String alias, final String[] args) {
++        if (args.length == 1) {
++            return List.of("on", "off").stream().filter(state -> state.startsWith(args[0].toLowerCase())).toList();
++        }
++        return List.of();
++    }
++}

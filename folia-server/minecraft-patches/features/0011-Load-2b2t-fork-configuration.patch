@@ -16,6 +16,17 @@ diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/Se
 index 1536a64a393bc1e9ace6fb34e359477bb6c744ae..666ffcfc7c6dc41ec293e79e8d8763ced71a97e5 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java
+@@ -35,7 +35,9 @@ public final class ServerEntityLookup extends EntityLookup {
+     public ServerEntityLookup(final ServerLevel world, final LevelCallback<Entity> worldCallback) {
+         super(world, worldCallback);
+         this.serverWorld = world;
+-        this.keepEnderPearlsTicking = PlatformHooks.get().addTicketForEnderPearls(world);
++        this.keepEnderPearlsTicking = PlatformHooks.get().addTicketForEnderPearls(world)
++            || (io.papermc.paper.configuration.Folia2b2tConfiguration.isEnderPearlStasisEnabled()
++                && !world.paperConfig().misc.legacyEnderPearlBehavior);
+     }
+ 
+     @Override
 @@ -117,7 +117,7 @@ public final class ServerEntityLookup extends EntityLookup {
          // the same pearl-specific ticket after a loaded-state transition as well: the ticket
          // set de-duplicates this identifier, and this closes a transition window where the
@@ -30,7 +41,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..3363d44126072598c15f11ac4f648cf9957902a9
 --- /dev/null
 +++ b/io/papermc/paper/configuration/Folia2b2tConfiguration.java
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,39 @@
 +package io.papermc.paper.configuration;
 +
 +import java.io.File;
@@ -43,6 +54,7 @@ index 0000000000000000000000000000000000000000..3363d44126072598c15f11ac4f648cf9
 +
 +    private static final Logger LOGGER = LoggerFactory.getLogger("Folia2b2tConfig");
 +    private static final File FILE = new File("config", "2b2tfolia.yml");
++    private static volatile boolean enderPearlStasisEnabled = true;
 +    private static volatile boolean reapplyEnderPearlTicketOnLoadedTransition = true;
 +
 +    private Folia2b2tConfiguration() {
@@ -55,10 +67,14 @@ index 0000000000000000000000000000000000000000..3363d44126072598c15f11ac4f648cf9
 +        }
 +
 +        final YamlConfiguration configuration = YamlConfiguration.loadConfiguration(FILE);
-+        final boolean enabled = configuration.getBoolean("ender-pearl-stasis.enabled", true);
-+        reapplyEnderPearlTicketOnLoadedTransition = enabled
++        enderPearlStasisEnabled = configuration.getBoolean("ender-pearl-stasis.enabled", true);
++        reapplyEnderPearlTicketOnLoadedTransition = enderPearlStasisEnabled
 +            && configuration.getBoolean("ender-pearl-stasis.reapply-ticket-on-loaded-transition", true);
-+        LOGGER.info("Loaded {} (ender-pearl-stasis reapply-ticket-on-loaded-transition: {})", FILE.getPath(), reapplyEnderPearlTicketOnLoadedTransition);
++        LOGGER.info("Loaded {} (ender-pearl-stasis enabled: {}, reapply-ticket-on-loaded-transition: {})", FILE.getPath(), enderPearlStasisEnabled, reapplyEnderPearlTicketOnLoadedTransition);
++    }
++
++    public static boolean isEnderPearlStasisEnabled() {
++        return enderPearlStasisEnabled;
 +    }
 +
 +    public static boolean reapplyEnderPearlTicketOnLoadedTransition() {

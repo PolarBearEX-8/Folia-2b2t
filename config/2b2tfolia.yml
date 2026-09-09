@@ -1,36 +1,6 @@
-# NewSV deployment profile. This file records the settings used by the fork;
-# apply each mapped key in the target file shown below, then restart the server.
-version: 1
-
-server-properties:
-  # server.properties
-  view-distance: 12
-  simulation-distance: 6
-
-paper-world-defaults:
-  # config/paper-world-defaults.yml
-  chunks:
-    delay-chunk-unloads-by: 60s
-  fixes:
-    disable-unloaded-chunk-enderpearl-exploit: false
-  misc:
-    legacy-ender-pearl-behavior: false
-
-anarchy-exploit-fixes:
-  # Keep the plugin's projectile limit enabled, but exempt stasis pearls.
-  projectile-limit:
-    enabled: true
-    whitelist:
-      - ENDER_PEARL
-
+# Folia 2b2t settings. Restart the server after changing this file.
 ender-pearl-stasis:
-  # These two keys are loaded automatically by the Folia 2b2t server at startup.
+  # Keep remote stasis pearls ticking with a dedicated chunk ticket.
   enabled: true
+  # Restore the ticket after a pearl transitions back to the loaded state.
   reapply-ticket-on-loaded-transition: true
-  # The Folia ticket lifecycle patch relies on this remaining false: with the
-  # modern Paper behavior, every live pearl has its own ticking ticket.
-  require-modern-paper-behavior: true
-  regression-test:
-    chamber-minimum-distance-chunks: 13
-    wait-after-leaving: 90s
-    repeat-throws: 3

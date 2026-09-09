@@ -1,0 +1,18 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <noreply@openai.com>
+Date: Wed, 9 Sep 2026 14:45:00 +0700
+Subject: [PATCH] Add TPS and RAM boss bar monitor
+
+
+diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
+--- a/io/papermc/paper/threadedregions/RegionizedServer.java
++++ b/io/papermc/paper/threadedregions/RegionizedServer.java
+@@ -339,5 +339,8 @@ public final class RegionizedServer {
+         // scheduler
+         ((FoliaGlobalRegionScheduler)Bukkit.getGlobalRegionScheduler()).tick();
+ 
++        // Folia - refresh opt-in TPS/RAM boss bars once per second
++        dev.folia.sea.monitor.SeaPerformanceMonitor.tick();
++
+         // commands
+         ((DedicatedServer)MinecraftServer.getServer()).handleConsoleInputs();

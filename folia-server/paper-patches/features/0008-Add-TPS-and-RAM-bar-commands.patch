@@ -1,0 +1,18 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <noreply@openai.com>
+Date: Wed, 9 Sep 2026 14:45:00 +0700
+Subject: [PATCH] Register TPS and RAM bar commands
+
+
+diff --git a/src/main/java/io/papermc/paper/command/PaperCommands.java b/src/main/java/io/papermc/paper/command/PaperCommands.java
+--- a/src/main/java/io/papermc/paper/command/PaperCommands.java
++++ b/src/main/java/io/papermc/paper/command/PaperCommands.java
+@@ -24,6 +24,8 @@ public final class PaperCommands {
+         COMMANDS.put("paper", new PaperCommand("paper"));
+         COMMANDS.put("mspt", new MSPTCommand("mspt"));
+         COMMANDS.put("tps", new io.papermc.paper.threadedregions.commands.CommandServerHealth()); // Folia - region threading
++        COMMANDS.put("ftpsbar", new dev.folia.sea.commands.CommandTpsBar());
++        COMMANDS.put("frambar", new dev.folia.sea.commands.CommandRambar());
+         COMMANDS.put("profiler", new io.papermc.paper.threadedregions.commands.CommandProfiler()); // Folia - region threading - profiler
+ 
+         COMMANDS.forEach((s, command) -> {
