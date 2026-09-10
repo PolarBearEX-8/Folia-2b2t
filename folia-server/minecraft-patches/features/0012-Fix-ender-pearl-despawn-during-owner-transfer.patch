@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Folia 2b2t Contributors <noreply@folia2b2t.dev>
+Date: Thu, 10 Sep 2026 23:00:00 +0700
+Subject: [PATCH] Fix ender pearl despawn during owner transfer
+
+Folia temporarily marks the owner removed while transferring between
+regions or dimensions. LivingEntity.isAlive includes that removal state,
+which is not proof of death. Use the actual dying predicate instead, while
+preserving the death gamerule and End credits exemption.
+
+diff --git a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
+--- a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
++++ b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
+@@ -256,7 +256,10 @@ public class ThrownEnderpearl extends ThrowableItemProjectile {
+             int sectionPosZ = SectionPos.blockToSectionCoord(this.position().z());
+             Entity entity = this.owner != null ? findOwnerIncludingDeadPlayer(serverLevel, this.owner.getUUID()) : null;
+             if (entity instanceof ServerPlayer serverPlayer
+-                && !entity.isAlive()
++                // Folia 2b2t - Ender Pearl Despawn: a transferring owner is temporarily
++                // removed from its world but is not dead. Keep the death gamerule
++                // behavior without treating CHANGED_DIMENSION as player death.
++                && serverPlayer.isDeadOrDying()
+                 && !serverPlayer.wonGame
+                 && serverPlayer.level().getGameRules().get(GameRules.ENDER_PEARLS_VANISH_ON_DEATH)) {
+                 this.discard(org.bukkit.event.entity.EntityRemoveEvent.Cause.DESPAWN); // CraftBukkit - add Bukkit remove cause

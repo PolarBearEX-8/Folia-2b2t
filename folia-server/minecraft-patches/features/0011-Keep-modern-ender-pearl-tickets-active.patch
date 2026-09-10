@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Folia 2b2t Contributors <noreply@folia2b2t.dev>
+Date: Thu, 10 Sep 2026 23:00:00 +0700
+Subject: [PATCH] Keep modern ender pearl tickets active
+
+Preserve the modern pearl ticket behavior without a fork-specific stasis
+configuration or startup loader. Existing Paper legacy behavior remains
+controlled by the existing Paper setting.
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java
+@@ -35,7 +35,8 @@ public final class ServerEntityLookup extends EntityLookup {
+     public ServerEntityLookup(final ServerLevel world, final LevelCallback<Entity> worldCallback) {
+         super(world, worldCallback);
+         this.serverWorld = world;
+-        this.keepEnderPearlsTicking = PlatformHooks.get().addTicketForEnderPearls(world);
++        this.keepEnderPearlsTicking = PlatformHooks.get().addTicketForEnderPearls(world)
++            || !world.paperConfig().misc.legacyEnderPearlBehavior;
+     }
+ 
+     @Override
