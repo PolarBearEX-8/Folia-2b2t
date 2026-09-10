@@ -1,18 +1,18 @@
-# Folia 2b2t 1.21.11-4
+# Folia 2b2t 1.21.11-5
 
-## Ender Pearl Stasis
+## Ender Pearl Despawn
 
-This release keeps stasis pearls ticketed whenever `ender-pearl-stasis.enabled` is true, even when PlatformHooks does not request a pearl ticket. This prevents a remote stasis chamber from unloading and stops its pearl from ceasing to tick. Legacy Ender Pearl behavior remains excluded.
+Fixes Ender Pearls incorrectly despawning while their owner transfers between dimensions or regions. Folia temporarily removes a player from the source world during an asynchronous transfer. That temporary removal must not be treated as player death by the Ender Pearl despawn check.
 
-The following keys control the fork patch:
+The death check now uses the owner's actual dying state rather than general entity liveness. The existing Ender Pearl death gamerule and End-credit exemption remain in effect. Genuine death is not exempted, and pearl physics, collisions and teleportation are unchanged.
 
-```yaml
-ender-pearl-stasis:
-  enabled: true
-  reapply-ticket-on-loaded-transition: true
-```
+### Configuration cleanup
 
-The release includes a regression-test procedure for remote stasis chambers, multiple pearls in one chunk, and cross-region cases.
+The fix is automatic: there is no custom stasis mode or new configuration switch. The obsolete `config/2b2tfolia.yml` loader and `ender-pearl-stasis.*` settings have been removed. Existing copies of that file are ignored by build 5 and can be archived or removed manually. They are not deleted at runtime.
+
+Modern Ender Pearl tickets and their loaded-state reapplication remain enabled automatically when modern Paper pearl behavior is in use. Existing Paper settings, gamerules, performance commands and client chunk cache settings remain available.
+
+See [Ender Pearl Despawn regression checks](docs/ender-pearl-despawn-regression.md) for dimension transfer, actual death, multiple pearls and chunk lifecycle scenarios.
 
 ## Performance Boss Bars
 

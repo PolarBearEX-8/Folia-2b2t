@@ -1,6 +1,0 @@
-# Folia 2b2t settings. Restart the server after changing this file.
-ender-pearl-stasis:
-  # Keep remote stasis pearls ticking with a dedicated chunk ticket.
-  enabled: true
-  # Restore the ticket after a pearl transitions back to the loaded state.
-  reapply-ticket-on-loaded-transition: true
