@@ -1,24 +1,21 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Folia 2b2t Contributors <noreply@folia2b2t.dev>
-Date: Mon, 8 Sep 2026 22:15:00 +0700
+Date: Tue, 8 Sep 2026 22:15:00 +0700
 Subject: [PATCH] Reapply ender pearl ticket on loaded transition
 
 The pearl-specific ticket is idempotent: its entity id is its identifier.
 Reapplying it after the entity becomes loaded closes any ticket-operation
 transition window without retaining a ticket after the pearl is removed.
 
----
- .../level/entity/server/ServerEntityLookup.java    | 7 +++++++
- 1 file changed, 7 insertions(+)
-
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java
-index b31b55f00e2ce1bd6c1011fe852bd1dbb37de524..1536a64a393bc1e9ace6fb34e359477bb6c744ae 100644
+index aa53138b3670a8337b639472a6ab5ce46702ff76..38859590db0fbd1250a361fe954114007b347733 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java
-@@ -113,6 +113,13 @@ public final class ServerEntityLookup extends EntityLookup {
+@@ -109,7 +109,16 @@ public final class ServerEntityLookup extends EntityLookup {
  
      @Override
      protected void entityStartLoaded(final Entity entity) {
+-
 +        // A pearl's ticket is normally installed when it is added to the lookup. Re-apply
 +        // the same pearl-specific ticket after a loaded-state transition as well: the ticket
 +        // set de-duplicates this identifier, and this closes a transition window where the
@@ -26,8 +23,9 @@ index b31b55f00e2ce1bd6c1011fe852bd1dbb37de524..1536a64a393bc1e9ace6fb34e359477b
 +        if (entity instanceof ThrownEnderpearl enderpearl) {
 +            this.addEnderPearl(CoordinateUtils.getChunkKey(enderpearl.chunkPosition()), enderpearl.getId());
 +        }
-         // Moonrise start - entity tracker
-         this.world.getCurrentWorldData().trackerEntities.add(entity); // Folia - region threading
-         // Moonrise end - entity tracker
--- 
-2.45.1.windows.1
++        // Moonrise start - entity tracker
++        this.world.getCurrentWorldData().trackerEntities.add(entity); // Folia - region threading
++        // Moonrise end - entity tracker
+     }
+ 
+     @Override

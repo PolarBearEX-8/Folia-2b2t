@@ -1,22 +1,16 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Folia 2b2t Contributors <noreply@folia2b2t.dev>
-Date: Mon, 8 Sep 2026 22:30:00 +0700
+Date: Tue, 8 Sep 2026 22:30:00 +0700
 Subject: [PATCH] Load 2b2t fork configuration
 
 Load config/2b2tfolia.yml at startup. Its Ender Pearl stasis settings control
 whether the ticket is reapplied when a pearl enters the loaded state.
 
----
- .../entity/server/ServerEntityLookup.java          |  2 +-
- .../paper/configuration/Folia2b2tConfiguration.java | 34 +++++++++++++++++++
- net/minecraft/server/dedicated/DedicatedServer.java  |  1 +
- 3 files changed, 36 insertions(+), 1 deletion(-)
-
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java
-index 1536a64a393bc1e9ace6fb34e359477bb6c744ae..666ffcfc7c6dc41ec293e79e8d8763ced71a97e5 100644
+index 38859590db0fbd1250a361fe954114007b347733..9999428f00177d89243b7a73d87d6f9b77bfa1e1 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/server/ServerEntityLookup.java
-@@ -117,7 +117,7 @@ public final class ServerEntityLookup extends EntityLookup {
+@@ -113,7 +113,7 @@ public final class ServerEntityLookup extends EntityLookup {
          // the same pearl-specific ticket after a loaded-state transition as well: the ticket
          // set de-duplicates this identifier, and this closes a transition window where the
          // entity becomes visible again after its original ticket operation was superseded.
@@ -66,10 +60,10 @@ index 0000000000000000000000000000000000000000..3363d44126072598c15f11ac4f648cf9
 +    }
 +}
 diff --git a/net/minecraft/server/dedicated/DedicatedServer.java b/net/minecraft/server/dedicated/DedicatedServer.java
-index 3462c251057773384de4f9bfd418b5a40fb9181e..675422066b9dfeaf70f88fe1486797f3c7a440d7 100644
+index 2fd7fa4ef069cf7dd81e5f5af3ef42f8801917e5..3f8c6929f0c07f9b54cd1b62ddde1d8a2ec75dca 100644
 --- a/net/minecraft/server/dedicated/DedicatedServer.java
 +++ b/net/minecraft/server/dedicated/DedicatedServer.java
-@@ -261,6 +261,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+@@ -238,6 +238,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
          this.paperConfigurations.initializeGlobalConfiguration(this.registryAccess());
          this.paperConfigurations.initializeWorldDefaultsConfiguration(this.registryAccess());
          // Paper end - initialize global and world-defaults configuration
@@ -77,5 +71,3 @@ index 3462c251057773384de4f9bfd418b5a40fb9181e..675422066b9dfeaf70f88fe1486797f3
          this.server.spark.enableEarlyIfRequested(); // Paper - spark
          // Paper start - fix converting txt to json file; convert old users earlier after PlayerList creation but before file load/save
          if (this.convertOldUsers()) {
--- 
-2.45.1.windows.1

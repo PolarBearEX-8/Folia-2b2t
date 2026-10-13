@@ -1,4 +1,4 @@
-# Folia 2b2t 1.21.11-3
+# Folia 2b2t 26.2
 
 ## Ender Pearl Stasis
 
