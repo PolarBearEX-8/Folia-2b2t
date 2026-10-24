@@ -26,3 +26,11 @@ jobs:
         run: ./gradlew applyAllPatches --stacktrace
       - name: Build
         run: ./gradlew -x :folia-checkstyle:check build
+      - name: Create Paperclip JAR
+        run: ./gradlew :folia-server:createPaperclipJar
+      - name: Upload Paperclip JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: folia2b2t-paperclip
+          path: folia-server/build/libs/folia-paperclip-*.jar
+          if-no-files-found: error
