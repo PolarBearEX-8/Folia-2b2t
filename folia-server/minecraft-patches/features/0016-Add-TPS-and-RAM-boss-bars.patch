@@ -1,0 +1,18 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Sat, 24 Oct 2026 21:20:00 +0700
+Subject: [PATCH] Add TPS and RAM boss bars
+
+
+diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
+index aa575f3b76ef70ffb9f0410e7e5cfe7af384bfbd..99e480e94050ddddb7e6a41901e9ed740b7c30ff 100644
+--- a/io/papermc/paper/threadedregions/RegionizedServer.java
++++ b/io/papermc/paper/threadedregions/RegionizedServer.java
+@@ -239,6 +239,7 @@ public final class RegionizedServer {
+ 
+         // scheduler
+         ((FoliaGlobalRegionScheduler)Bukkit.getGlobalRegionScheduler()).tick();
++        dev.folia.sea.monitor.SeaPerformanceMonitor.tick();
+ 
+         // clock tick
+         this.tickClocks();

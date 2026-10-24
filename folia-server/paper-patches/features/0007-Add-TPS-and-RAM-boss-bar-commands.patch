@@ -1,0 +1,19 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Sat, 24 Oct 2026 20:47:17 +0700
+Subject: [PATCH] Add TPS and RAM boss bar commands
+
+
+diff --git a/src/main/java/io/papermc/paper/command/PaperCommands.java b/src/main/java/io/papermc/paper/command/PaperCommands.java
+index 6216147f4d4c04ba616375430a91232d5ebe838a..ec9aa934f88b821521394a9f4707825f8a8ede2d 100644
+--- a/src/main/java/io/papermc/paper/command/PaperCommands.java
++++ b/src/main/java/io/papermc/paper/command/PaperCommands.java
+@@ -24,6 +24,8 @@ public final class PaperCommands {
+     public static void registerCommands(final MinecraftServer server) {
+         COMMANDS.put("paper", new PaperCommand("paper"));
+         COMMANDS.put("tps", new io.papermc.paper.threadedregions.commands.CommandServerHealth()); // Folia - region threading
++        COMMANDS.put("ftpsbar", new dev.folia.sea.commands.CommandTpsBar());
++        COMMANDS.put("frambar", new dev.folia.sea.commands.CommandRambar());
+         COMMANDS.put("profiler", new io.papermc.paper.threadedregions.commands.CommandProfiler()); // Folia - region threading - profiler
+ 
+         COMMANDS.forEach((s, command) -> {

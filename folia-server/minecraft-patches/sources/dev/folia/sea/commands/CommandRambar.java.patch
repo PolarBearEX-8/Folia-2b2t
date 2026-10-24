@@ -1,0 +1,49 @@
+--- /dev/null
++++ b/dev/folia/sea/commands/CommandRambar.java
+@@ -1,0 +_,46 @@
++package dev.folia.sea.commands;
++
++import dev.folia.sea.monitor.SeaPerformanceMonitor;
++import net.kyori.adventure.text.Component;
++import net.kyori.adventure.text.format.NamedTextColor;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++import org.bukkit.entity.Player;
++
++import java.util.List;
++
++public final class CommandRambar extends Command {
++
++    public CommandRambar() {
++        super("frambar", "Toggles the real-time RAM usage boss bar", "/frambar [on|off]", List.of("memorybar", "ram-meter"));
++        this.setPermission(null);
++    }
++
++    @Override
++    public boolean execute(final CommandSender sender, final String commandLabel, final String[] args) {
++        if (!(sender instanceof Player player)) {
++            sender.sendMessage(Component.text("Only players can use /frambar", NamedTextColor.RED));
++            return true;
++        }
++
++        final Boolean enabled = CommandTpsBar.resolveState(args, SeaPerformanceMonitor.isRamBarEnabled(player.getUniqueId()));
++        if (enabled == null) {
++            sender.sendMessage(Component.text("Usage: /frambar [on|off]", NamedTextColor.RED));
++            return true;
++        }
++
++        SeaPerformanceMonitor.setRamBarEnabled(player.getUniqueId(), enabled);
++        player.sendActionBar(Component.text(enabled ? "RAM bar enabled" : "RAM bar disabled",
++            enabled ? NamedTextColor.GREEN : NamedTextColor.RED));
++        return true;
++    }
++
++    @Override
++    public List<String> tabComplete(final CommandSender sender, final String alias, final String[] args) {
++        if (args.length == 1) {
++            final String prefix = args[0].toLowerCase(java.util.Locale.ROOT);
++            return List.of("on", "off").stream().filter(state -> state.startsWith(prefix)).toList();
++        }
++        return List.of();
++    }
++}
