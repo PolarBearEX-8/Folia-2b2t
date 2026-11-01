@@ -1,0 +1,33 @@
+From 1fdef30726a2f22daabee65b5b6ce9ed974b046f Mon Sep 17 00:00:00 2001
+From: Folia 2b2t Contributors <noreply@folia2b2t.dev>
+Date: Sat, 31 Oct 2026 22:47:21 +0700
+Subject: [PATCH] AntiXray per-player chunk refresh packets
+
+---
+ io/papermc/paper/FeatureHooks.java | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/io/papermc/paper/FeatureHooks.java b/io/papermc/paper/FeatureHooks.java
+index 337a2fb..506d19a 100644
+--- a/io/papermc/paper/FeatureHooks.java
++++ b/io/papermc/paper/FeatureHooks.java
+@@ -53,10 +53,15 @@ public final class FeatureHooks {
+     public static void sendChunkRefreshPackets(final List<ServerPlayer> playersInRange, final LevelChunk chunk) {
+         // Paper start - Anti-Xray
+         final Map<Object, ClientboundLevelChunkWithLightPacket> refreshPackets = new HashMap<>();
++        final var blockController = chunk.getLevel().chunkPacketBlockController;
+         for (final ServerPlayer player : playersInRange) {
+             if (player.connection == null) continue;
+ 
+-            final Boolean shouldModify = chunk.getLevel().chunkPacketBlockController.shouldModify(player, chunk);
++            final Boolean shouldModify = blockController.shouldModify(player, chunk);
++            if (blockController.requiresPerPlayerChunkPackets()) {
++                player.connection.send(new ClientboundLevelChunkWithLightPacket(chunk, chunk.getLevel().getLightEngine(), null, null, shouldModify));
++                continue;
++            }
+             player.connection.send(refreshPackets.computeIfAbsent(shouldModify, s -> { // Use connection to prevent creating firing event
+                 return new ClientboundLevelChunkWithLightPacket(chunk, chunk.getLevel().getLightEngine(), null, null, (Boolean) s);
+             }));
+-- 
+2.45.1.windows.1
+

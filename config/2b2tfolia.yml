@@ -2,6 +2,11 @@
 # apply each mapped key in the target file shown below, then restart the server.
 version: 1
 
+seed-protection:
+  # Obfuscate structure placement seeds for newly generated chunks.
+  # The secret is stored in config/2b2tfolia-seed.key. Keep a private backup.
+  enabled: true
+
 server-properties:
   # server.properties
   view-distance: 12

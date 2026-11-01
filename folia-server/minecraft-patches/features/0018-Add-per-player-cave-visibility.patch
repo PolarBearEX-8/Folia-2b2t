@@ -1,0 +1,191 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Folia 2b2t Contributors <noreply@folia2b2t.dev>
+Date: Sun, 1 Nov 2026 19:00:00 +0700
+Subject: [PATCH] Add per-player cave visibility packet and tick hooks
+
+diff --git a/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java b/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java
+--- a/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java
++++ b/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java
+@@ -47,21 +47,40 @@
+         this(levelChunk, null);
+     }
+     public ClientboundLevelChunkPacketData(final LevelChunk levelChunk, final io.papermc.paper.antixray.ChunkPacketInfo<net.minecraft.world.level.block.state.BlockState> chunkPacketInfo) {
++        this(levelChunk, chunkPacketInfo, null, null);
++    }
++
++    public ClientboundLevelChunkPacketData(LevelChunk chunk, LevelChunkSection[] sections, java.util.function.Predicate<BlockPos> sendBlockEntity) {
++        this(chunk, null, sections, sendBlockEntity);
++    }
++
++    private ClientboundLevelChunkPacketData(LevelChunk levelChunk,
++        io.papermc.paper.antixray.ChunkPacketInfo<net.minecraft.world.level.block.state.BlockState> chunkPacketInfo,
++        LevelChunkSection @Nullable [] sections, java.util.function.@Nullable Predicate<BlockPos> sendBlockEntity) {
+         // Paper end - Anti-Xray - Add chunk packet info
+         this.heightmaps = levelChunk.getHeightmaps()
+             .stream()
+             .filter(entryx -> ((Heightmap.Types)entryx.getKey()).sendToClient())
+             .collect(Collectors.toMap(Entry::getKey, entryx -> (long[])((Heightmap)entryx.getValue()).getRawData().clone()));
+-        this.buffer = new byte[calculateChunkSize(levelChunk)];
++        LevelChunkSection[] packetSections = sections == null ? levelChunk.getSections() : sections;
++        this.buffer = new byte[java.util.Arrays.stream(packetSections).mapToInt(LevelChunkSection::getSerializedSize).sum()];
+         // Paper start - Anti-Xray - Add chunk packet info
+         if (chunkPacketInfo != null) {
+             chunkPacketInfo.setBuffer(this.buffer);
+         }
+-        extractChunkData(new FriendlyByteBuf(this.getWriteBuffer()), levelChunk, chunkPacketInfo);
++        FriendlyByteBuf output = new FriendlyByteBuf(this.getWriteBuffer());
++        try {
++            int sectionIndex = 0;
++            for (LevelChunkSection section : packetSections) section.write(output, chunkPacketInfo, sectionIndex++);
++            if (output.writerIndex() != this.buffer.length) throw new IllegalStateException("Incorrect chunk snapshot buffer size");
++        } finally {
++            output.release();
++        }
+         this.blockEntitiesData = Lists.newArrayList();
+         int totalTileEntities = 0; // Paper - Handle oversized block entities in chunks
+ 
+         for (Entry<BlockPos, BlockEntity> entry : levelChunk.getBlockEntities().entrySet()) {
++            if (sendBlockEntity != null && !sendBlockEntity.test(entry.getKey())) continue;
+             // Paper start - Handle oversized block entities in chunks
+             if (++totalTileEntities > BLOCK_ENTITY_LIMIT) {
+                 net.minecraft.network.protocol.Packet<ClientGamePacketListener> packet = entry.getValue().getUpdatePacket();
+diff --git a/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java b/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java
+--- a/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java
++++ b/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java
+@@ -57,6 +57,15 @@
+         levelChunk.getLevel().chunkPacketBlockController.modifyBlocks(this, chunkPacketInfo); // Paper - Anti-Xray - Modify blocks
+     }
+ 
++    public ClientboundLevelChunkWithLightPacket(ClientboundLevelChunkWithLightPacket source,
++        ClientboundLevelChunkPacketData chunkData, ClientboundLightUpdatePacketData lightData) {
++        this.x = source.x;
++        this.z = source.z;
++        this.chunkData = chunkData;
++        this.lightData = lightData;
++        this.ready = true;
++    }
++
+     private ClientboundLevelChunkWithLightPacket(final RegistryFriendlyByteBuf input) {
+         this.x = input.readInt();
+         this.z = input.readInt();
+diff --git a/net/minecraft/network/protocol/game/ClientboundLightUpdatePacket.java b/net/minecraft/network/protocol/game/ClientboundLightUpdatePacket.java
+--- a/net/minecraft/network/protocol/game/ClientboundLightUpdatePacket.java
++++ b/net/minecraft/network/protocol/game/ClientboundLightUpdatePacket.java
+@@ -26,6 +26,12 @@
+         this.x = pos.x();
+         this.z = pos.z();
+         this.lightData = new ClientboundLightUpdatePacketData(pos, lightEngine, skyChangedLightSectionFilter, blockChangedLightSectionFilter);
++    }
++
++    public ClientboundLightUpdatePacket(ClientboundLightUpdatePacket source, ClientboundLightUpdatePacketData lightData) {
++        this.x = source.x;
++        this.z = source.z;
++        this.lightData = lightData;
+     }
+ 
+     private ClientboundLightUpdatePacket(final FriendlyByteBuf input) {
+diff --git a/net/minecraft/network/protocol/game/ClientboundLightUpdatePacketData.java b/net/minecraft/network/protocol/game/ClientboundLightUpdatePacketData.java
+--- a/net/minecraft/network/protocol/game/ClientboundLightUpdatePacketData.java
++++ b/net/minecraft/network/protocol/game/ClientboundLightUpdatePacketData.java
+@@ -56,6 +56,36 @@
+         this.blockUpdates = input.readList(DATA_LAYER_STREAM_CODEC);
+     }
+ 
++    private ClientboundLightUpdatePacketData(ClientboundLightUpdatePacketData source) {
++        this.skyYMask = (BitSet)source.skyYMask.clone();
++        this.blockYMask = (BitSet)source.blockYMask.clone();
++        this.emptySkyYMask = (BitSet)source.emptySkyYMask.clone();
++        this.emptyBlockYMask = (BitSet)source.emptyBlockYMask.clone();
++        this.skyUpdates = source.skyUpdates.stream().map(byte[]::clone).collect(java.util.stream.Collectors.toCollection(java.util.ArrayList::new));
++        this.blockUpdates = source.blockUpdates.stream().map(byte[]::clone).collect(java.util.stream.Collectors.toCollection(java.util.ArrayList::new));
++    }
++
++    public ClientboundLightUpdatePacketData copyWithMask(java.util.function.IntPredicate visible, int minLightSection) {
++        ClientboundLightUpdatePacketData copy = new ClientboundLightUpdatePacketData(this);
++        mask(copy.skyYMask, copy.skyUpdates, visible, minLightSection);
++        mask(copy.blockYMask, copy.blockUpdates, visible, minLightSection);
++        return copy;
++    }
++
++    private static void mask(BitSet sections, List<byte[]> updates, java.util.function.IntPredicate visible, int minLightSection) {
++        int arrayIndex = 0;
++        for (int section = sections.nextSetBit(0); section >= 0; section = sections.nextSetBit(section + 1)) {
++            byte[] light = updates.get(arrayIndex++);
++            int bottom = (minLightSection + section) << 12;
++            for (int index = 0; index < 4096; index++) {
++                if (!visible.test(bottom | index)) {
++                    int byteIndex = index >> 1;
++                    light[byteIndex] = (byte)(light[byteIndex] & ((index & 1) == 0 ? 0xF0 : 0x0F));
++                }
++            }
++        }
++    }
++
+     public void write(final FriendlyByteBuf output) {
+         output.writeBitSet(this.skyYMask);
+         output.writeBitSet(this.blockYMask);
+diff --git a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+--- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+@@ -304,7 +304,7 @@
+         this.send(packet, null);
+     }
+ 
+-    public void send(final Packet<?> packet, final @Nullable ChannelFutureListener listener) {
++    public void send(Packet<?> packet, final @Nullable ChannelFutureListener listener) {
+         // CraftBukkit start
+         if (packet == null) {
+             return;
+@@ -312,6 +312,10 @@
+             serverGamePacketListener.player.compassTarget = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(defaultSpawnPositionPacket.respawnData().pos(), serverGamePacketListener.getPlayer().level());
+         }
+         // CraftBukkit end
++        if (this instanceof ServerGamePacketListenerImpl gameListener) {
++            packet = gameListener.player.level().chunkPacketBlockController.filterPacket(gameListener.player, packet);
++            if (packet == null) return;
++        }
+         if (packet.isTerminal()) {
+             this.close();
+         }
+@@ -323,7 +327,8 @@
+         } catch (Throwable t) {
+             CrashReport report = CrashReport.forThrowable(t, "Sending packet");
+             CrashReportCategory category = report.addCategory("Packet being sent");
+-            category.setDetail("Packet class", () -> packet.getClass().getCanonicalName());
++            final Packet<?> failedPacket = packet;
++            category.setDetail("Packet class", () -> failedPacket.getClass().getCanonicalName());
+             throw new ReportedException(report);
+         }
+     }
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -363,6 +363,8 @@
+     }
+     // Paper end - configuration phase API
+ 
++    public final io.papermc.paper.antixray.CavePlayerState caveVisibility = new io.papermc.paper.antixray.CavePlayerState();
++
+     @Override
+     public void tick() {
+         // Folia start - region threading
+@@ -398,6 +400,7 @@
+         this.player.yo = this.player.getY();
+         this.player.zo = this.player.getZ();
+         this.player.doTick();
++        this.player.level().chunkPacketBlockController.tickPlayer(this.player);
+         this.player.absSnapTo(this.firstGoodX, this.firstGoodY, this.firstGoodZ, this.player.getYRot(), this.player.getXRot());
+         this.tickCount++;
+         this.knownMovePacketCount = this.receivedMovePacketCount;
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -893,7 +893,7 @@
+         this.palettedContainerFactory = PalettedContainerFactory.create(registryAccess);
+         this.damageSources = new DamageSources(registryAccess);
+         this.entityLookup = new ca.spottedleaf.moonrise.patches.chunk_system.level.entity.dfl.DefaultEntityLookup(this); // Paper - rewrite chunk system
+-        this.chunkPacketBlockController = this.paperConfig().anticheat.antiXray.enabled ? new io.papermc.paper.antixray.ChunkPacketBlockControllerAntiXray(this, executor) : io.papermc.paper.antixray.ChunkPacketBlockController.NO_OPERATION_INSTANCE; // Paper - Anti-Xray
++        this.chunkPacketBlockController = this.paperConfig().anticheat.antiXray.enabled ? io.papermc.paper.antixray.ChunkPacketBlockController.create(this, executor) : io.papermc.paper.antixray.ChunkPacketBlockController.NO_OPERATION_INSTANCE; // Paper - Anti-Xray
+         // Folia start - profiler
+         this.tickTimerId = ca.spottedleaf.leafprofiler.LProfilerRegistry.GLOBAL_REGISTRY.getOrCreateTimer("Tick World: " + dimension.identifier().toString());
+         // Folia end - profiler

@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Folia 2b2t Contributors <noreply@folia2b2t.dev>
+Date: Sun, 1 Nov 2026 23:00:00 +0700
+Subject: [PATCH] Hide entities and effects in unrevealed cave cells
+
+diff --git a/net/minecraft/network/protocol/game/ClientboundEntityEventPacket.java b/net/minecraft/network/protocol/game/ClientboundEntityEventPacket.java
+--- a/net/minecraft/network/protocol/game/ClientboundEntityEventPacket.java
++++ b/net/minecraft/network/protocol/game/ClientboundEntityEventPacket.java
+@@ -30,6 +30,10 @@
+         output.writeByte(this.eventId);
+     }
+ 
++    public int getEntityId() {
++        return this.entityId;
++    }
++
+     @Override
+     public PacketType<ClientboundEntityEventPacket> type() {
+         return GamePacketTypes.CLIENTBOUND_ENTITY_EVENT;
+diff --git a/net/minecraft/network/protocol/game/ClientboundMoveEntityPacket.java b/net/minecraft/network/protocol/game/ClientboundMoveEntityPacket.java
+--- a/net/minecraft/network/protocol/game/ClientboundMoveEntityPacket.java
++++ b/net/minecraft/network/protocol/game/ClientboundMoveEntityPacket.java
+@@ -40,6 +40,10 @@
+         this.onGround = onGround;
+         this.hasRot = hasRot;
+         this.hasPos = hasPos;
++    }
++
++    public int getEntityId() {
++        return this.entityId;
+     }
+ 
+     @Override
+diff --git a/net/minecraft/network/protocol/game/ClientboundRotateHeadPacket.java b/net/minecraft/network/protocol/game/ClientboundRotateHeadPacket.java
+--- a/net/minecraft/network/protocol/game/ClientboundRotateHeadPacket.java
++++ b/net/minecraft/network/protocol/game/ClientboundRotateHeadPacket.java
+@@ -31,6 +31,10 @@
+         output.writeByte(this.yHeadRot);
+     }
+ 
++    public int getEntityId() {
++        return this.entityId;
++    }
++
+     @Override
+     public PacketType<ClientboundRotateHeadPacket> type() {
+         return GamePacketTypes.CLIENTBOUND_ROTATE_HEAD;
+diff --git a/net/minecraft/network/protocol/game/ClientboundSetPassengersPacket.java b/net/minecraft/network/protocol/game/ClientboundSetPassengersPacket.java
+--- a/net/minecraft/network/protocol/game/ClientboundSetPassengersPacket.java
++++ b/net/minecraft/network/protocol/game/ClientboundSetPassengersPacket.java
+@@ -22,6 +22,11 @@
+         for (int i = 0; i < entities.size(); i++) {
+             this.passengers[i] = entities.get(i).getId();
+         }
++    }
++
++    public ClientboundSetPassengersPacket(final int vehicle, final int[] passengers) {
++        this.vehicle = vehicle;
++        this.passengers = passengers.clone();
+     }
+ 
+     private ClientboundSetPassengersPacket(final FriendlyByteBuf input) {
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -1398,6 +1398,9 @@
+                 }
+                 // CraftBukkit end
+                 if (visibleToPlayer) {
++                    visibleToPlayer = ChunkMap.this.level.chunkPacketBlockController.shouldTrackEntity(player, this.entity);
++                }
++                if (visibleToPlayer) {
+                     if (this.seenBy.add(player.connection)) {
+                         // Paper start - entity tracking events
+                         if (io.papermc.paper.event.player.PlayerTrackEntityEvent.getHandlerList().getRegisteredListeners().length == 0 || new io.papermc.paper.event.player.PlayerTrackEntityEvent(player.getBukkitEntity(), this.entity.getBukkitEntity()).callEvent()) {

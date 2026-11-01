@@ -1,0 +1,354 @@
+diff --git a/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockController.java b/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockController.java
+index 774a1b052..cbf136804 100644
+--- a/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockController.java
++++ b/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockController.java
+@@ -28,6 +28,10 @@ public class ChunkPacketBlockController {
+         return false;
+     }
+ 
++    public boolean requiresPerPlayerChunkPackets() {
++        return false;
++    }
++
+     public ChunkPacketInfo<BlockState> getChunkPacketInfo(ClientboundLevelChunkWithLightPacket chunkPacket, LevelChunk chunk) {
+         return null;
+     }
+diff --git a/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockControllerAntiXray.java b/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockControllerAntiXray.java
+index 8d523f5f1..770212ce8 100644
+--- a/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockControllerAntiXray.java
++++ b/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockControllerAntiXray.java
+@@ -41,11 +41,13 @@ import org.bukkit.Bukkit;
+ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockController {
+ 
+     private static final Palette<BlockState> GLOBAL_BLOCKSTATE_PALETTE = new GlobalPalette<>(Block.BLOCK_STATE_REGISTRY);
++    private static final double MODE4_VIEW_HALF_ANGLE_COSINE = 0.0D; // PlayerCulling's 90-degree half-angle; actual client FOV is unavailable
+     private static final BlockState[] PRESET_AIR = {Blocks.AIR.defaultBlockState()};
+     private static final Direction[] DIRECTIONS = Direction.values();
+     private static final LevelChunkSection EMPTY_SECTION = null;
+     private final Executor executor;
+     private final EngineMode engineMode;
++    private final ThreadLocal<ChunkPacketInfoAntiXray.PlayerView> pendingPlayerView = new ThreadLocal<>();
+     private final int maxBlockHeight;
+     private final int updateRadius;
+     private final boolean usePermission;
+@@ -211,6 +213,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+ 
+     @Override
+     public boolean shouldModify(ServerPlayer player, LevelChunk chunk) {
++        this.pendingPlayerView.remove();
+         if (usePermission && player.getBukkitEntity().hasPermission("paper.antixray.bypass")) {
+             return false;
+         }
+@@ -231,13 +234,23 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+             }
+         }
+ 
++        if (engineMode == EngineMode.HIDE_AS_AIR) {
++            this.pendingPlayerView.set(ChunkPacketInfoAntiXray.PlayerView.capture(player));
++        }
+         return true;
+     }
+ 
++    @Override
++    public boolean requiresPerPlayerChunkPackets() {
++        return engineMode == EngineMode.HIDE_AS_AIR;
++    }
++
+     @Override
+     public ChunkPacketInfoAntiXray getChunkPacketInfo(ClientboundLevelChunkWithLightPacket chunkPacket, LevelChunk chunk) {
+         // Return a new instance to collect data and objects in the right state while creating the chunk packet for thread safe access later
+-        return new ChunkPacketInfoAntiXray(chunkPacket, chunk, this);
++        ChunkPacketInfoAntiXray.PlayerView playerView = this.pendingPlayerView.get();
++        this.pendingPlayerView.remove();
++        return new ChunkPacketInfoAntiXray(chunkPacket, chunk, this, playerView);
+     }
+ 
+     @Override
+@@ -294,9 +307,11 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+         LevelChunk chunk = chunkPacketInfoAntiXray.getChunk();
+         Level level = chunk.getLevel();
+         LevelChunk[] nearbyChunks = chunkPacketInfoAntiXray.getNearbyChunks();
++        ChunkPacketInfoAntiXray.PlayerView playerView = chunkPacketInfoAntiXray.getPlayerView();
+         int chunkMinBlockX = chunk.getPos().getMinBlockX();
+         int chunkMinBlockZ = chunk.getPos().getMinBlockZ();
+         BlockPos.MutableBlockPos skyCheckPosition = new BlockPos.MutableBlockPos();
++        BlockPos.MutableBlockPos sightCheckPosition = new BlockPos.MutableBlockPos();
+         int[] surfaceHeights = null;
+ 
+         if (engineMode == EngineMode.HIDE_AS_AIR && level.dimensionType().hasSkyLight()) {
+@@ -409,7 +424,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+ 
+                     // Abuse the obfuscateLayer method to read the blocks of the first layer of the current chunk section
+                     bitStorageWriter.setBits(0);
+-                    obfuscateLayer(-1, (chunkSectionIndex + chunk.getMinSectionY()) << 4, level, chunk, nearbyChunks, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition, bitStorageReader, bitStorageWriter, solidTemp, obfuscateTemp, presetBlockStateBitsTemp, current, next, nextNext, emptyNearbyChunkSections, random);
++                    obfuscateLayer(-1, (chunkSectionIndex + chunk.getMinSectionY()) << 4, level, chunk, nearbyChunks, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition, bitStorageReader, bitStorageWriter, solidTemp, obfuscateTemp, presetBlockStateBitsTemp, current, next, nextNext, emptyNearbyChunkSections, random);
+                 }
+ 
+                 bitStorageWriter.setBits(chunkPacketInfoAntiXray.getBits(chunkSectionIndex));
+@@ -425,7 +440,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+                     next = nextNext;
+                     nextNext = temp;
+                     random.nextLayer();
+-                    obfuscateLayer(y, (chunkSectionIndex + chunk.getMinSectionY()) << 4, level, chunk, nearbyChunks, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition, bitStorageReader, bitStorageWriter, solidTemp, obfuscateTemp, presetBlockStateBitsTemp, current, next, nextNext, nearbyChunkSections, random);
++                    obfuscateLayer(y, (chunkSectionIndex + chunk.getMinSectionY()) << 4, level, chunk, nearbyChunks, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition, bitStorageReader, bitStorageWriter, solidTemp, obfuscateTemp, presetBlockStateBitsTemp, current, next, nextNext, nearbyChunkSections, random);
+                 }
+ 
+                 // Check if the chunk section above doesn't need obfuscation
+@@ -451,7 +466,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+                         bitStorageReader.setBits(0);
+                         solid[0] = true;
+                         random.nextLayer();
+-                        obfuscateLayer(15, (chunkSectionIndex + chunk.getMinSectionY()) << 4, level, chunk, nearbyChunks, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition, bitStorageReader, bitStorageWriter, solid, obfuscateTemp, presetBlockStateBitsTemp, current, next, nextNext, nearbyChunkSections, random);
++                        obfuscateLayer(15, (chunkSectionIndex + chunk.getMinSectionY()) << 4, level, chunk, nearbyChunks, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition, bitStorageReader, bitStorageWriter, solid, obfuscateTemp, presetBlockStateBitsTemp, current, next, nextNext, nearbyChunkSections, random);
+                     }
+                 } else {
+                     // If not, initialize the reader and other stuff for the chunk section above to obfuscate the upper layer of the current chunk section
+@@ -464,7 +479,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+                     next = nextNext;
+                     nextNext = temp;
+                     random.nextLayer();
+-                    obfuscateLayer(15, (chunkSectionIndex + chunk.getMinSectionY()) << 4, level, chunk, nearbyChunks, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition, bitStorageReader, bitStorageWriter, solidTemp, obfuscateTemp, presetBlockStateBitsTemp, current, next, nextNext, nearbyChunkSections, random);
++                    obfuscateLayer(15, (chunkSectionIndex + chunk.getMinSectionY()) << 4, level, chunk, nearbyChunks, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition, bitStorageReader, bitStorageWriter, solidTemp, obfuscateTemp, presetBlockStateBitsTemp, current, next, nextNext, nearbyChunkSections, random);
+                 }
+ 
+                 bitStorageWriter.flush();
+@@ -474,7 +489,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+         chunkPacketInfoAntiXray.getChunkPacket().setReady(true);
+     }
+ 
+-    private void obfuscateLayer(int y, int sectionBaseY, Level level, LevelChunk chunk, LevelChunk[] nearbyChunks, int chunkMinBlockX, int chunkMinBlockZ, int[] surfaceHeights, BlockPos.MutableBlockPos skyCheckPosition, BitStorageReader bitStorageReader, BitStorageWriter bitStorageWriter, boolean[] solid, boolean[] obfuscate, int[] presetBlockStateBits, boolean[][] current, boolean[][] next, boolean[][] nextNext, LevelChunkSection[] nearbyChunkSections, IntSupplier random) {
++    private void obfuscateLayer(int y, int sectionBaseY, Level level, LevelChunk chunk, LevelChunk[] nearbyChunks, int chunkMinBlockX, int chunkMinBlockZ, int[] surfaceHeights, ChunkPacketInfoAntiXray.PlayerView playerView, BlockPos.MutableBlockPos sightCheckPosition, BlockPos.MutableBlockPos skyCheckPosition, BitStorageReader bitStorageReader, BitStorageWriter bitStorageWriter, boolean[] solid, boolean[] obfuscate, int[] presetBlockStateBits, boolean[][] current, boolean[][] next, boolean[][] nextNext, LevelChunkSection[] nearbyChunkSections, IntSupplier random) {
+         // First block of first line
+         int bits = bitStorageReader.read();
+ 
+@@ -483,7 +498,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+             next[0][1] = true;
+             next[1][0] = true;
+         } else {
+-            if (shouldSkipObfuscation(current[0][0] || isTransparent(nearbyChunkSections[2], 0, y, 15) || isTransparent(nearbyChunkSections[0], 15, y, 0), 0, 0, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition)) {
++            if (shouldSkipObfuscation(current[0][0] || isTransparent(nearbyChunkSections[2], 0, y, 15) || isTransparent(nearbyChunkSections[0], 15, y, 0), 0, 0, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition)) {
+                 bitStorageWriter.skip();
+             } else {
+                 bitStorageWriter.write(presetBlockStateBits[random.getAsInt()]);
+@@ -504,7 +519,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+                 next[0][x + 1] = true;
+                 next[1][x] = true;
+             } else {
+-                if (shouldSkipObfuscation(current[0][x] || isTransparent(nearbyChunkSections[2], x, y, 15), x, 0, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition)) {
++                if (shouldSkipObfuscation(current[0][x] || isTransparent(nearbyChunkSections[2], x, y, 15), x, 0, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition)) {
+                     bitStorageWriter.skip();
+                 } else {
+                     bitStorageWriter.write(presetBlockStateBits[random.getAsInt()]);
+@@ -524,7 +539,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+             next[0][14] = true;
+             next[1][15] = true;
+         } else {
+-            if (shouldSkipObfuscation(current[0][15] || isTransparent(nearbyChunkSections[2], 15, y, 15) || isTransparent(nearbyChunkSections[1], 0, y, 0), 15, 0, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition)) {
++            if (shouldSkipObfuscation(current[0][15] || isTransparent(nearbyChunkSections[2], 15, y, 15) || isTransparent(nearbyChunkSections[1], 0, y, 0), 15, 0, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition)) {
+                 bitStorageWriter.skip();
+             } else {
+                 bitStorageWriter.write(presetBlockStateBits[random.getAsInt()]);
+@@ -546,7 +561,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+                 next[z - 1][0] = true;
+                 next[z + 1][0] = true;
+             } else {
+-                if (shouldSkipObfuscation(current[z][0] || isTransparent(nearbyChunkSections[0], 15, y, z), 0, z, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition)) {
++                if (shouldSkipObfuscation(current[z][0] || isTransparent(nearbyChunkSections[0], 15, y, z), 0, z, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition)) {
+                     bitStorageWriter.skip();
+                 } else {
+                     bitStorageWriter.write(presetBlockStateBits[random.getAsInt()]);
+@@ -568,7 +583,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+                     next[z - 1][x] = true;
+                     next[z + 1][x] = true;
+                 } else {
+-                    if (shouldSkipObfuscation(current[z][x], x, z, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition)) {
++                    if (shouldSkipObfuscation(current[z][x], x, z, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition)) {
+                         bitStorageWriter.skip();
+                     } else {
+                         bitStorageWriter.write(presetBlockStateBits[random.getAsInt()]);
+@@ -589,7 +604,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+                 next[z - 1][15] = true;
+                 next[z + 1][15] = true;
+             } else {
+-                if (shouldSkipObfuscation(current[z][15] || isTransparent(nearbyChunkSections[1], 0, y, z), 15, z, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition)) {
++                if (shouldSkipObfuscation(current[z][15] || isTransparent(nearbyChunkSections[1], 0, y, z), 15, z, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition)) {
+                     bitStorageWriter.skip();
+                 } else {
+                     bitStorageWriter.write(presetBlockStateBits[random.getAsInt()]);
+@@ -609,7 +624,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+             next[15][1] = true;
+             next[14][0] = true;
+         } else {
+-            if (shouldSkipObfuscation(current[15][0] || isTransparent(nearbyChunkSections[3], 0, y, 0) || isTransparent(nearbyChunkSections[0], 15, y, 15), 0, 15, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition)) {
++            if (shouldSkipObfuscation(current[15][0] || isTransparent(nearbyChunkSections[3], 0, y, 0) || isTransparent(nearbyChunkSections[0], 15, y, 15), 0, 15, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition)) {
+                 bitStorageWriter.skip();
+             } else {
+                 bitStorageWriter.write(presetBlockStateBits[random.getAsInt()]);
+@@ -630,7 +645,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+                 next[15][x + 1] = true;
+                 next[14][x] = true;
+             } else {
+-                if (shouldSkipObfuscation(current[15][x] || isTransparent(nearbyChunkSections[3], x, y, 0), x, 15, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition)) {
++                if (shouldSkipObfuscation(current[15][x] || isTransparent(nearbyChunkSections[3], x, y, 0), x, 15, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition)) {
+                     bitStorageWriter.skip();
+                 } else {
+                     bitStorageWriter.write(presetBlockStateBits[random.getAsInt()]);
+@@ -650,7 +665,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+             next[15][14] = true;
+             next[14][15] = true;
+         } else {
+-            if (shouldSkipObfuscation(current[15][15] || isTransparent(nearbyChunkSections[3], 15, y, 0) || isTransparent(nearbyChunkSections[1], 0, y, 15), 15, 15, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, skyCheckPosition)) {
++            if (shouldSkipObfuscation(current[15][15] || isTransparent(nearbyChunkSections[3], 15, y, 0) || isTransparent(nearbyChunkSections[1], 0, y, 15), 15, 15, sectionBaseY + y, y, level, chunkMinBlockX, chunkMinBlockZ, surfaceHeights, playerView, sightCheckPosition, skyCheckPosition)) {
+                 bitStorageWriter.skip();
+             } else {
+                 bitStorageWriter.write(presetBlockStateBits[random.getAsInt()]);
+@@ -662,7 +677,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+         }
+     }
+ 
+-    private boolean shouldSkipObfuscation(boolean exposed, int localX, int localZ, int worldY, int localY, Level level, int chunkMinBlockX, int chunkMinBlockZ, int[] surfaceHeights, BlockPos.MutableBlockPos skyCheckPosition) {
++    private boolean shouldSkipObfuscation(boolean exposed, int localX, int localZ, int worldY, int localY, Level level, int chunkMinBlockX, int chunkMinBlockZ, int[] surfaceHeights, ChunkPacketInfoAntiXray.PlayerView playerView, BlockPos.MutableBlockPos sightCheckPosition, BlockPos.MutableBlockPos skyCheckPosition) {
+         if (!exposed) {
+             return false;
+         }
+@@ -681,10 +696,14 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+             return true;
+         }
+ 
+-        // Preserve exposed terrain that still receives meaningful skylight. Deep,
+-        // dark cave walls stay hidden, while shaded slopes and overhangs remain intact.
+         int worldX = chunkMinBlockX + localX;
+         int worldZ = chunkMinBlockZ + localZ;
++        if (playerView != null && !isVisibleFromPlayer(level, playerView, worldX, worldY, worldZ, sightCheckPosition)) {
++            return false;
++        }
++
++        // Preserve exposed terrain that still receives meaningful skylight. Deep,
++        // dark cave walls stay hidden, while shaded slopes and overhangs remain intact.
+         for (Direction direction : DIRECTIONS) {
+             skyCheckPosition.set(worldX + direction.getStepX(), worldY + direction.getStepY(), worldZ + direction.getStepZ());
+             if (level.getBrightness(LightLayer.SKY, skyCheckPosition) >= 8) {
+@@ -695,6 +714,84 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+         return false;
+     }
+ 
++    private boolean isVisibleFromPlayer(Level level, ChunkPacketInfoAntiXray.PlayerView playerView, int blockX, int blockY, int blockZ, BlockPos.MutableBlockPos rayCheckPosition) {
++        double targetX = blockX + 0.5D - playerView.eyeX();
++        double targetY = blockY + 0.5D - playerView.eyeY();
++        double targetZ = blockZ + 0.5D - playerView.eyeZ();
++        double distanceSquared = targetX * targetX + targetY * targetY + targetZ * targetZ;
++        if (distanceSquared < 1.0E-6D) {
++            return true;
++        }
++
++        double viewDot = targetX * playerView.directionX() + targetY * playerView.directionY() + targetZ * playerView.directionZ();
++        if (viewDot < Math.sqrt(distanceSquared) * MODE4_VIEW_HALF_ANGLE_COSINE) {
++            return false;
++        }
++
++        return hasLineOfSight(level, playerView, blockX, blockY, blockZ, targetX, targetY, targetZ, rayCheckPosition);
++    }
++
++    private boolean hasLineOfSight(Level level, ChunkPacketInfoAntiXray.PlayerView playerView, int targetBlockX, int targetBlockY, int targetBlockZ, double deltaX, double deltaY, double deltaZ, BlockPos.MutableBlockPos rayCheckPosition) {
++        int steps = Math.min(1024, (int) Math.ceil(Math.max(Math.max(Math.abs(deltaX), Math.abs(deltaY)), Math.abs(deltaZ)) * 2.0D));
++        if (steps <= 1) {
++            return true;
++        }
++
++        int previousX = (int) Math.floor(playerView.eyeX());
++        int previousY = (int) Math.floor(playerView.eyeY());
++        int previousZ = (int) Math.floor(playerView.eyeZ());
++        int loadedChunkX = Integer.MIN_VALUE;
++        int loadedChunkZ = Integer.MIN_VALUE;
++        LevelChunk loadedChunk = null;
++
++        for (int step = 1; step < steps; step++) {
++            double progress = step / (double) steps;
++            int x = (int) Math.floor(playerView.eyeX() + deltaX * progress);
++            int y = (int) Math.floor(playerView.eyeY() + deltaY * progress);
++            int z = (int) Math.floor(playerView.eyeZ() + deltaZ * progress);
++            if (x == previousX && y == previousY && z == previousZ) {
++                continue;
++            }
++            previousX = x;
++            previousY = y;
++            previousZ = z;
++
++            if (x == targetBlockX && y == targetBlockY && z == targetBlockZ) {
++                continue;
++            }
++            if (y < level.getMinY() || y > level.getMaxY()) {
++                continue;
++            }
++
++            int chunkX = x >> 4;
++            int chunkZ = z >> 4;
++            if (chunkX != loadedChunkX || chunkZ != loadedChunkZ) {
++                loadedChunk = level.getChunkIfLoaded(chunkX, chunkZ);
++                loadedChunkX = chunkX;
++                loadedChunkZ = chunkZ;
++                if (loadedChunk == null) {
++                    return false;
++                }
++            }
++
++            rayCheckPosition.set(x, y, z);
++            BlockState state = loadedChunk.getBlockState(rayCheckPosition);
++            if (state.isAir()) {
++                continue;
++            }
++            try {
++                if (solidGlobal[GLOBAL_BLOCKSTATE_PALETTE.idFor(state, PaletteResize.noResizeExpected())]) {
++                    return false;
++                }
++            } catch (MissingPaletteEntryException ignored) {
++                // Unknown block states block visibility rather than exposing the target.
++                return false;
++            }
++        }
++
++        return true;
++    }
++
+     private boolean isTransparent(LevelChunkSection chunkSection, int x, int y, int z) {
+         if (chunkSection == EMPTY_SECTION) {
+             return true;
+diff --git a/src/main/java/io/papermc/paper/antixray/ChunkPacketInfoAntiXray.java b/src/main/java/io/papermc/paper/antixray/ChunkPacketInfoAntiXray.java
+index 7d8dff55b..b3c1e8fa7 100644
+--- a/src/main/java/io/papermc/paper/antixray/ChunkPacketInfoAntiXray.java
++++ b/src/main/java/io/papermc/paper/antixray/ChunkPacketInfoAntiXray.java
+@@ -1,17 +1,33 @@
+ package io.papermc.paper.antixray;
+ 
+ import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.phys.Vec3;
+ import net.minecraft.world.level.block.state.BlockState;
+ import net.minecraft.world.level.chunk.LevelChunk;
+ 
+ public final class ChunkPacketInfoAntiXray extends ChunkPacketInfo<BlockState> implements Runnable {
+ 
+     private final ChunkPacketBlockControllerAntiXray chunkPacketBlockControllerAntiXray;
++    private final PlayerView playerView;
+     private LevelChunk[] nearbyChunks;
+ 
+-    public ChunkPacketInfoAntiXray(ClientboundLevelChunkWithLightPacket chunkPacket, LevelChunk chunk, ChunkPacketBlockControllerAntiXray chunkPacketBlockControllerAntiXray) {
++    public ChunkPacketInfoAntiXray(ClientboundLevelChunkWithLightPacket chunkPacket, LevelChunk chunk, ChunkPacketBlockControllerAntiXray chunkPacketBlockControllerAntiXray, PlayerView playerView) {
+         super(chunkPacket, chunk);
+         this.chunkPacketBlockControllerAntiXray = chunkPacketBlockControllerAntiXray;
++        this.playerView = playerView;
++    }
++
++    public PlayerView getPlayerView() {
++        return this.playerView;
++    }
++
++    public record PlayerView(double eyeX, double eyeY, double eyeZ, double directionX, double directionY, double directionZ) {
++        public static PlayerView capture(ServerPlayer player) {
++            Vec3 eye = player.getEyePosition();
++            Vec3 direction = player.getViewVector(1.0F).normalize();
++            return new PlayerView(eye.x, eye.y, eye.z, direction.x, direction.y, direction.z);
++        }
+     }
+ 
+     public LevelChunk[] getNearbyChunks() {

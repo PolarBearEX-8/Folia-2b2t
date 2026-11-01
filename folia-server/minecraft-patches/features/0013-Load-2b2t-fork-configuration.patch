@@ -21,13 +21,29 @@ index 38859590db0fbd1250a361fe954114007b347733..9999428f00177d89243b7a73d87d6f9b
          // Moonrise start - entity tracker
 diff --git a/io/papermc/paper/configuration/Folia2b2tConfiguration.java b/io/papermc/paper/configuration/Folia2b2tConfiguration.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..3363d44126072598c15f11ac4f648cf9957902a9
+index 0000000000000000000000000000000000000000..570164f98fcf6e3bf2d9576d98af529b7eb0caf1
 --- /dev/null
 +++ b/io/papermc/paper/configuration/Folia2b2tConfiguration.java
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,148 @@
 +package io.papermc.paper.configuration;
 +
 +import java.io.File;
++import java.io.IOException;
++import java.nio.ByteBuffer;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.StandardOpenOption;
++import java.nio.file.attribute.PosixFilePermission;
++import java.nio.file.attribute.PosixFilePermissions;
++import java.security.GeneralSecurityException;
++import java.security.SecureRandom;
++import java.util.EnumSet;
++import java.util.HexFormat;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentMap;
++import javax.crypto.Mac;
++import javax.crypto.spec.SecretKeySpec;
 +import org.bukkit.configuration.file.YamlConfiguration;
 +import org.slf4j.Logger;
 +import org.slf4j.LoggerFactory;
@@ -37,26 +53,124 @@ index 0000000000000000000000000000000000000000..3363d44126072598c15f11ac4f648cf9
 +
 +    private static final Logger LOGGER = LoggerFactory.getLogger("Folia2b2tConfig");
 +    private static final File FILE = new File("config", "2b2tfolia.yml");
++    private static final Path STRUCTURE_SEED_KEY_FILE = Path.of("config", "2b2tfolia-seed.key");
++    private static final ConcurrentMap<StructureSaltKey, Integer> STRUCTURE_SALT_CACHE = new ConcurrentHashMap<>();
++    private static final ConcurrentMap<StructureSeedKey, Long> STRUCTURE_SEED_CACHE = new ConcurrentHashMap<>();
 +    private static volatile boolean reapplyEnderPearlTicketOnLoadedTransition = true;
++    private static volatile boolean structureSeedProtectionEnabled = true;
++    private static volatile SecretKeySpec structureSeedProtectionKey;
 +
 +    private Folia2b2tConfiguration() {
 +    }
 +
 +    public static void load() {
 +        if (!FILE.isFile()) {
-+            LOGGER.warn("{} was not found; using the default Ender Pearl stasis settings", FILE.getPath());
-+            return;
++            LOGGER.warn("{} was not found; using default Folia 2b2t settings", FILE.getPath());
 +        }
 +
-+        final YamlConfiguration configuration = YamlConfiguration.loadConfiguration(FILE);
++        final YamlConfiguration configuration = FILE.isFile() ? YamlConfiguration.loadConfiguration(FILE) : new YamlConfiguration();
 +        final boolean enabled = configuration.getBoolean("ender-pearl-stasis.enabled", true);
 +        reapplyEnderPearlTicketOnLoadedTransition = enabled
 +            && configuration.getBoolean("ender-pearl-stasis.reapply-ticket-on-loaded-transition", true);
-+        LOGGER.info("Loaded {} (ender-pearl-stasis reapply-ticket-on-loaded-transition: {})", FILE.getPath(), reapplyEnderPearlTicketOnLoadedTransition);
++
++        structureSeedProtectionEnabled = configuration.getBoolean("seed-protection.enabled", true);
++        STRUCTURE_SALT_CACHE.clear();
++        STRUCTURE_SEED_CACHE.clear();
++        if (structureSeedProtectionEnabled) {
++            structureSeedProtectionKey = loadOrCreateStructureSeedKey();
++            LOGGER.info("Structure placement seed protection is enabled; secret key is stored in {}", STRUCTURE_SEED_KEY_FILE);
++        } else {
++            structureSeedProtectionKey = null;
++            LOGGER.info("Structure placement seed protection is disabled");
++        }
++
++        LOGGER.info("Loaded {} (ender-pearl-stasis reapply-ticket-on-loaded-transition: {}, structure-seed-protection: {})", FILE.getPath(), reapplyEnderPearlTicketOnLoadedTransition, structureSeedProtectionEnabled);
 +    }
 +
 +    public static boolean reapplyEnderPearlTicketOnLoadedTransition() {
 +        return reapplyEnderPearlTicketOnLoadedTransition;
++    }
++
++    public static boolean structureSeedProtectionEnabled() {
++        return structureSeedProtectionEnabled;
++    }
++
++    public static int protectedStructureSalt(final long worldSeed, final String structureSetKey, final int originalSalt) {
++        if (!structureSeedProtectionEnabled) {
++            return originalSalt;
++        }
++
++        final StructureSaltKey key = new StructureSaltKey(worldSeed, structureSetKey, originalSalt);
++        return STRUCTURE_SALT_CACHE.computeIfAbsent(key, ignored -> {
++            final byte[] digest = deriveStructureValue((byte)1, worldSeed, structureSetKey, originalSalt);
++            return ByteBuffer.wrap(digest).getInt();
++        });
++    }
++
++    public static long protectedStructureSeed(final long worldSeed, final String structureSetKey, final long originalSeed) {
++        if (!structureSeedProtectionEnabled) {
++            return originalSeed;
++        }
++
++        final StructureSeedKey key = new StructureSeedKey(worldSeed, structureSetKey, originalSeed);
++        return STRUCTURE_SEED_CACHE.computeIfAbsent(key, ignored -> ByteBuffer.wrap(deriveStructureValue((byte)2, worldSeed, structureSetKey, originalSeed)).getLong());
++    }
++
++    private static byte[] deriveStructureValue(final byte purpose, final long worldSeed, final String structureSetKey, final long originalValue) {
++        final SecretKeySpec key = structureSeedProtectionKey;
++        if (key == null) {
++            throw new IllegalStateException("Structure seed protection is enabled without a loaded secret key");
++        }
++
++        try {
++            final byte[] keyBytes = structureSetKey.getBytes(StandardCharsets.UTF_8);
++            final ByteBuffer input = ByteBuffer.allocate(Byte.BYTES + Long.BYTES + Long.BYTES + Integer.BYTES + keyBytes.length);
++            input.put(purpose).putLong(worldSeed).putLong(originalValue).putInt(keyBytes.length).put(keyBytes);
++
++            final Mac mac = Mac.getInstance("HmacSHA256");
++            mac.init(key);
++            return mac.doFinal(input.array());
++        } catch (final GeneralSecurityException exception) {
++            throw new IllegalStateException("Unable to derive protected structure seed", exception);
++        }
++    }
++
++    private static SecretKeySpec loadOrCreateStructureSeedKey() {
++        try {
++            Files.createDirectories(STRUCTURE_SEED_KEY_FILE.getParent());
++            if (!Files.exists(STRUCTURE_SEED_KEY_FILE)) {
++                final byte[] generatedKey = new byte[32];
++                new SecureRandom().nextBytes(generatedKey);
++                final String encodedKey = HexFormat.of().formatHex(generatedKey) + System.lineSeparator();
++                try {
++                    try {
++                        Files.createFile(
++                            STRUCTURE_SEED_KEY_FILE,
++                            PosixFilePermissions.asFileAttribute(EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE))
++                        );
++                    } catch (final UnsupportedOperationException ignored) {
++                        Files.createFile(STRUCTURE_SEED_KEY_FILE);
++                    }
++                    Files.writeString(STRUCTURE_SEED_KEY_FILE, encodedKey, StandardCharsets.UTF_8, StandardOpenOption.WRITE);
++                } catch (final java.nio.file.FileAlreadyExistsException ignored) {
++                    // Another startup process created the key between the existence check and file creation.
++                }
++            }
++
++            final byte[] decodedKey = HexFormat.of().parseHex(Files.readString(STRUCTURE_SEED_KEY_FILE, StandardCharsets.UTF_8).trim());
++            if (decodedKey.length != 32) {
++                throw new IllegalStateException(STRUCTURE_SEED_KEY_FILE + " must contain a 256-bit (64 hex character) key");
++            }
++            return new SecretKeySpec(decodedKey, "HmacSHA256");
++        } catch (final IOException | IllegalArgumentException exception) {
++            throw new IllegalStateException("Unable to load or create structure seed secret at " + STRUCTURE_SEED_KEY_FILE, exception);
++        }
++    }
++
++    private record StructureSaltKey(long worldSeed, String structureSetKey, int originalSalt) {
++    }
++
++    private record StructureSeedKey(long worldSeed, String structureSetKey, long originalSeed) {
 +    }
 +}
 diff --git a/net/minecraft/server/dedicated/DedicatedServer.java b/net/minecraft/server/dedicated/DedicatedServer.java

@@ -1,0 +1,1835 @@
+diff --git a/src/main/java/io/papermc/paper/antixray/CaveEffectFilter.java b/src/main/java/io/papermc/paper/antixray/CaveEffectFilter.java
+new file mode 100644
+index 000000000..e9a1ce0a7
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/antixray/CaveEffectFilter.java
+@@ -0,0 +1,135 @@
++package io.papermc.paper.antixray;
++
++import it.unimi.dsi.fastutil.ints.IntArrayList;
++import java.util.Optional;
++import net.minecraft.core.BlockPos;
++import net.minecraft.network.protocol.Packet;
++import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
++import net.minecraft.network.protocol.game.ClientboundAnimatePacket;
++import net.minecraft.network.protocol.game.ClientboundDamageEventPacket;
++import net.minecraft.network.protocol.game.ClientboundDebugBlockValuePacket;
++import net.minecraft.network.protocol.game.ClientboundDebugEntityValuePacket;
++import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
++import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
++import net.minecraft.network.protocol.game.ClientboundExplodePacket;
++import net.minecraft.network.protocol.game.ClientboundHurtAnimationPacket;
++import net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket;
++import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
++import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
++import net.minecraft.network.protocol.game.ClientboundRemoveMobEffectPacket;
++import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
++import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
++import net.minecraft.network.protocol.game.ClientboundSetEntityLinkPacket;
++import net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket;
++import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
++import net.minecraft.network.protocol.game.ClientboundSetPassengersPacket;
++import net.minecraft.network.protocol.game.ClientboundSoundEntityPacket;
++import net.minecraft.network.protocol.game.ClientboundSoundPacket;
++import net.minecraft.network.protocol.game.ClientboundTakeItemEntityPacket;
++import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
++import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
++import net.minecraft.network.protocol.game.ClientboundUpdateMobEffectPacket;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.phys.Vec3;
++
++/** Filters only published masks and known IDs. Never looks up world entities or recalculates visibility. */
++final class CaveEffectFilter {
++    private CaveEffectFilter() {
++    }
++
++    static boolean protectedEntity(ServerPlayer player, int id) {
++        if (id == player.getId()) return true;
++        Entity root = player.getRootVehicle();
++        if (root != null && root.getId() == id) return true;
++        Entity camera = player.getCamera();
++        return camera != null && camera.getId() == id;
++    }
++
++    private static boolean known(CavePlayerState state, ServerPlayer player, int id) {
++        return state.trackedEntities.contains(id) || protectedEntity(player, id);
++    }
++
++    private static boolean visible(ChunkPacketBlockControllerCave controller, CavePlayerState state, double x, double y, double z) {
++        return Double.isFinite(x) && Double.isFinite(y) && Double.isFinite(z)
++            && controller.visible(state, BlockPos.containing(x, y, z));
++    }
++
++    static Packet<?> filter(ChunkPacketBlockControllerCave controller, ServerPlayer player, Packet<?> packet,
++                            CavePlayerState state, boolean bypass) {
++        if (packet instanceof ClientboundRemoveEntitiesPacket removed) {
++            for (int id : removed.getEntityIds()) state.trackedEntities.remove(id);
++            return packet; // Always allow cleanup, including after a chunk unload or a hide transition.
++        }
++        if (packet instanceof ClientboundAddEntityPacket spawn) {
++            if (bypass || protectedEntity(player, spawn.getId()) || visible(controller, state, spawn.getX(), spawn.getY(), spawn.getZ())) {
++                state.trackedEntities.add(spawn.getId());
++                return packet;
++            }
++            return null;
++        }
++        if (bypass) return packet;
++        if (packet instanceof ClientboundLevelParticlesPacket particles) {
++            return visible(controller, state, particles.getX(), particles.getY(), particles.getZ()) ? packet : null;
++        }
++        if (packet instanceof ClientboundSoundPacket sound) {
++            return visible(controller, state, sound.getX(), sound.getY(), sound.getZ()) ? packet : null;
++        }
++        if (packet instanceof ClientboundExplodePacket explosion) {
++            // Explosion packets also carry client physics: never discard knockback affecting this player.
++            return explosion.playerKnockback().isPresent()
++                || visible(controller, state, explosion.center().x, explosion.center().y, explosion.center().z) ? packet : null;
++        }
++        if (packet instanceof ClientboundDebugBlockValuePacket debug) {
++            return controller.visible(state, debug.blockPos()) ? packet : null;
++        }
++        if (packet instanceof ClientboundTakeItemEntityPacket pickup) {
++            return known(state, player, pickup.getItemId()) && known(state, player, pickup.getPlayerId()) ? packet : null;
++        }
++        if (packet instanceof ClientboundSetEntityLinkPacket link) {
++            return known(state, player, link.getSourceId()) && (link.getDestId() == 0 || known(state, player, link.getDestId())) ? packet : null;
++        }
++        if (packet instanceof ClientboundSetPassengersPacket passengers) {
++            if (!known(state, player, passengers.getVehicle())) return null;
++            IntArrayList allowed = null;
++            int[] ids = passengers.getPassengers();
++            for (int i = 0; i < ids.length; i++) {
++                if (known(state, player, ids[i])) {
++                    if (allowed != null) allowed.add(ids[i]);
++                } else if (allowed == null) {
++                    allowed = new IntArrayList(ids.length);
++                    for (int previous = 0; previous < i; previous++) allowed.add(ids[previous]);
++                }
++            }
++            return allowed == null ? packet : new ClientboundSetPassengersPacket(passengers.getVehicle(), allowed.toIntArray());
++        }
++        if (packet instanceof ClientboundDamageEventPacket damage) {
++            if (!known(state, player, damage.entityId())) return null;
++            int cause = known(state, player, damage.sourceCauseId()) ? damage.sourceCauseId() : -1;
++            int direct = known(state, player, damage.sourceDirectId()) ? damage.sourceDirectId() : -1;
++            Optional<Vec3> position = damage.sourcePosition().filter(pos -> visible(controller, state, pos.x, pos.y, pos.z));
++            if (cause == damage.sourceCauseId() && direct == damage.sourceDirectId() && position.equals(damage.sourcePosition())) return packet;
++            return new ClientboundDamageEventPacket(damage.entityId(), damage.sourceType(), cause, direct, position);
++        }
++
++        int target = switch (packet) {
++            case ClientboundSetEntityDataPacket value -> value.id();
++            case ClientboundSetEntityMotionPacket value -> value.id();
++            case ClientboundEntityPositionSyncPacket value -> value.id();
++            case ClientboundTeleportEntityPacket value -> value.id();
++            case ClientboundMoveEntityPacket value -> value.getEntityId();
++            case ClientboundRotateHeadPacket value -> value.getEntityId();
++            case ClientboundEntityEventPacket value -> value.getEntityId();
++            case ClientboundAnimatePacket value -> value.getId();
++            case ClientboundHurtAnimationPacket value -> value.id();
++            case ClientboundSetEquipmentPacket value -> value.getEntity();
++            case ClientboundUpdateAttributesPacket value -> value.getEntityId();
++            case ClientboundUpdateMobEffectPacket value -> value.getEntityId();
++            case ClientboundRemoveMobEffectPacket value -> value.entityId();
++            case ClientboundSoundEntityPacket value -> value.getId();
++            case ClientboundDebugEntityValuePacket value -> value.entityId();
++            default -> Integer.MIN_VALUE;
++        };
++        return target == Integer.MIN_VALUE || known(state, player, target) ? packet : null;
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/antixray/CavePlayerState.java b/src/main/java/io/papermc/paper/antixray/CavePlayerState.java
+new file mode 100644
+index 000000000..853318cdd
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/antixray/CavePlayerState.java
+@@ -0,0 +1,43 @@
++package io.papermc.paper.antixray;
++
++import java.util.BitSet;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++
++/** Connection-owned state; does not retain players after disconnect. Masks are immutable once published. */
++public final class CavePlayerState {
++    ChunkPacketBlockControllerCave controller;
++    final Map<Long, View> sent = new ConcurrentHashMap<>();
++    final it.unimi.dsi.fastutil.ints.IntOpenHashSet trackedEntities = new it.unimi.dsi.fastutil.ints.IntOpenHashSet();
++    final java.util.ArrayDeque<Long> pending = new java.util.ArrayDeque<>();
++    final java.util.HashSet<Long> queued = new java.util.HashSet<>();
++    volatile Map<Long, BitSet> nearby = Map.of();
++    int ticks;
++    int lastX = Integer.MIN_VALUE;
++    int lastY;
++    int lastZ;
++
++    synchronized void reset(ChunkPacketBlockControllerCave controller) {
++        if (this.controller == controller) return;
++        clear();
++        this.controller = controller;
++    }
++
++    public synchronized void clear() {
++        this.sent.clear();
++        this.trackedEntities.clear();
++        this.pending.clear();
++        this.queued.clear();
++        this.nearby = Map.of();
++        this.controller = null;
++        this.ticks = 0;
++        this.lastX = Integer.MIN_VALUE;
++    }
++
++    void queue(long key) {
++        if (this.queued.add(key)) this.pending.addLast(key);
++    }
++
++    record View(BitSet cells, boolean bypass, long revision) {
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/antixray/CaveVisibility.java b/src/main/java/io/papermc/paper/antixray/CaveVisibility.java
+new file mode 100644
+index 000000000..6e14eff14
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/antixray/CaveVisibility.java
+@@ -0,0 +1,125 @@
++package io.papermc.paper.antixray;
++
++import java.util.BitSet;
++
++/** Bounded, six-connected flood fill over an immutable voxel snapshot. */
++final class CaveVisibility {
++    private CaveVisibility() {
++    }
++
++    static boolean anySet(long[] words, int start, int end) {
++        if (start >= end || (start >>> 6) >= words.length) return false;
++        int word = start >>> 6;
++        int shift = start & 63;
++        int length = end - start; // Callers query at most four adjacent voxels.
++        long bits = words[word] >>> shift;
++        if (shift + length > 64 && word + 1 < words.length) bits |= words[word + 1] << (64 - shift);
++        return (bits & ((1L << length) - 1)) != 0;
++    }
++
++    static BitSet projectToChunk(BitSet visited, int baseX, int baseY, int baseZ, int width, int height, int depth,
++                                int minY, int maxY, int chunkMinX, int chunkMinZ) {
++        long[] words = visited.toLongArray();
++        BitSet cells = new BitSet();
++        int lowX = Math.max(Math.floorDiv(baseX, 4) * 4, chunkMinX - 4);
++        int highX = Math.min(baseX + width, chunkMinX + 20);
++        int lowZ = Math.max(Math.floorDiv(baseZ, 4) * 4, chunkMinZ - 4);
++        int highZ = Math.min(baseZ + depth, chunkMinZ + 20);
++        for (int y = Math.max(Math.floorDiv(baseY, 4) * 4, minY - 4); y < Math.min(baseY + height, maxY + 4); y += 4) {
++            for (int z = lowZ; z < highZ; z += 4) {
++                for (int x = lowX; x < highX; x += 4) {
++                    boolean found = false;
++                    for (int by = Math.max(y, baseY); by < Math.min(y + 4, baseY + height) && !found; by++) {
++                        for (int bz = Math.max(z, baseZ); bz < Math.min(z + 4, baseZ + depth); bz++) {
++                            int start = ((by - baseY) * depth + bz - baseZ) * width + Math.max(x, baseX) - baseX;
++                            int end = start + Math.min(x + 4, baseX + width) - Math.max(x, baseX);
++                            if (anySet(words, start, end)) { found = true; break; }
++                        }
++                    }
++                    if (!found) continue;
++                    mark(cells, x, y, z, minY, maxY, chunkMinX, chunkMinZ);
++                    mark(cells, x - 4, y, z, minY, maxY, chunkMinX, chunkMinZ);
++                    mark(cells, x + 4, y, z, minY, maxY, chunkMinX, chunkMinZ);
++                    mark(cells, x, y - 4, z, minY, maxY, chunkMinX, chunkMinZ);
++                    mark(cells, x, y + 4, z, minY, maxY, chunkMinX, chunkMinZ);
++                    mark(cells, x, y, z - 4, minY, maxY, chunkMinX, chunkMinZ);
++                    mark(cells, x, y, z + 4, minY, maxY, chunkMinX, chunkMinZ);
++                }
++            }
++        }
++        return cells;
++    }
++
++    private static void mark(BitSet cells, int x, int y, int z, int minY, int maxY, int chunkMinX, int chunkMinZ) {
++        if (x >= chunkMinX && x < chunkMinX + 16 && z >= chunkMinZ && z < chunkMinZ + 16 && y >= minY && y < maxY) {
++            cells.set(cellIndex(x, y, z, minY));
++        }
++    }
++
++    static BitSet exterior(BitSet open, BitSet sky, int width, int height, int depth, int distance) {
++        BitSet caves = (BitSet)open.clone();
++        caves.andNot(sky);
++        BitSet seeds = new BitSet();
++        int layer = width * depth;
++        for (int index = caves.nextSetBit(0); index >= 0; index = caves.nextSetBit(index + 1)) {
++            int x = index % width;
++            int z = (index / width) % depth;
++            int y = index / layer;
++            if ((x > 0 && sky.get(index - 1)) || (x + 1 < width && sky.get(index + 1))
++                || (z > 0 && sky.get(index - width)) || (z + 1 < depth && sky.get(index + width))
++                || (y > 0 && sky.get(index - layer)) || (y + 1 < height && sky.get(index + layer))) seeds.set(index);
++        }
++        BitSet result = (BitSet)sky.clone();
++        if (distance > 0) result.or(flood(caves, seeds, width, height, depth, distance - 1, width * height * depth));
++        return result;
++    }
++
++    static BitSet flood(BitSet open, BitSet seeds, int width, int height, int depth, int distance, int budget) {
++        int size = Math.multiplyExact(Math.multiplyExact(width, height), depth);
++        int capacity = Math.min(size, budget);
++        int[] queue = new int[capacity];
++        byte[] distances = new byte[size];
++        BitSet visited = new BitSet(size);
++        int tail = 0;
++        for (int index = seeds.nextSetBit(0); index >= 0 && index < size && tail < capacity; index = seeds.nextSetBit(index + 1)) {
++            if (open.get(index)) {
++                visited.set(index);
++                queue[tail++] = index;
++            }
++        }
++        int layer = width * depth;
++        for (int head = 0; head < tail; head++) {
++            int index = queue[head];
++            int step = Byte.toUnsignedInt(distances[index]);
++            if (step >= distance) continue;
++            int x = index % width;
++            int z = (index / width) % depth;
++            int y = index / layer;
++            for (int direction = 0; direction < 6; direction++) {
++                int next;
++                switch (direction) {
++                    case 0 -> { if (x == 0) continue; next = index - 1; }
++                    case 1 -> { if (x + 1 == width) continue; next = index + 1; }
++                    case 2 -> { if (z == 0) continue; next = index - width; }
++                    case 3 -> { if (z + 1 == depth) continue; next = index + width; }
++                    case 4 -> { if (y == 0) continue; next = index - layer; }
++                    default -> { if (y + 1 == height) continue; next = index + layer; }
++                }
++                if (tail < capacity && open.get(next) && !visited.get(next)) {
++                    visited.set(next);
++                    distances[next] = (byte)(step + 1);
++                    queue[tail++] = next;
++                }
++            }
++        }
++        return visited;
++    }
++
++    static int cellIndex(int x, int y, int z, int minY) {
++        return ((y - minY) >> 2) * 16 + ((z & 15) >> 2) * 4 + ((x & 15) >> 2);
++    }
++
++    static boolean visible(BitSet cells, int x, int y, int z, int minY, int maxY) {
++        return y < minY || y >= maxY || cells.get(cellIndex(x, y, z, minY));
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockController.java b/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockController.java
+index 774a1b052..78a981614 100644
+--- a/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockController.java
++++ b/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockController.java
+@@ -24,6 +24,24 @@ public class ChunkPacketBlockController {
+         return null;
+     }
+ 
++    public static ChunkPacketBlockController create(Level level, java.util.concurrent.Executor executor) {
++        return level.paperConfig().anticheat.antiXray.engineMode == io.papermc.paper.configuration.type.EngineMode.HIDE_AS_AIR
++            ? new ChunkPacketBlockControllerCave(level) : new ChunkPacketBlockControllerAntiXray(level, executor);
++    }
++
++    public void tickPlayer(ServerPlayer player) {
++    }
++
++    public boolean shouldTrackEntity(ServerPlayer player, net.minecraft.world.entity.Entity entity) {
++        return true;
++    }
++
++    public net.minecraft.network.protocol.Packet<?> filterPacket(ServerPlayer player, net.minecraft.network.protocol.Packet<?> packet) {
++        if (packet instanceof net.minecraft.network.protocol.game.ClientboundRespawnPacket
++            || packet instanceof net.minecraft.network.protocol.game.ClientboundLoginPacket) player.connection.caveVisibility.clear();
++        return packet;
++    }
++
+     public boolean shouldModify(ServerPlayer player, LevelChunk chunk) {
+         return false;
+     }
+diff --git a/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockControllerCave.java b/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockControllerCave.java
+new file mode 100644
+index 000000000..eb230f830
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockControllerCave.java
+@@ -0,0 +1,713 @@
++package io.papermc.paper.antixray;
++
++import com.google.common.cache.Cache;
++import com.google.common.cache.CacheBuilder;
++import it.unimi.dsi.fastutil.shorts.Short2ObjectLinkedOpenHashMap;
++import io.papermc.paper.configuration.WorldConfiguration;
++import java.time.Duration;
++import java.util.BitSet;
++import java.util.HashMap;
++import java.util.Map;
++import net.minecraft.core.BlockPos;
++import net.minecraft.core.Direction;
++import net.minecraft.core.SectionPos;
++import net.minecraft.core.registries.Registries;
++import net.minecraft.network.protocol.Packet;
++import net.minecraft.network.protocol.game.ClientGamePacketListener;
++import net.minecraft.network.protocol.game.ClientboundBlockDestructionPacket;
++import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
++import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
++import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
++import net.minecraft.network.protocol.game.ClientboundBundlePacket;
++import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
++import net.minecraft.network.protocol.game.ClientboundLevelChunkPacketData;
++import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
++import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
++import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
++import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
++import net.minecraft.network.protocol.game.ClientboundLoginPacket;
++import net.minecraft.network.protocol.game.ClientboundRespawnPacket;
++import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.tags.BlockTags;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.biome.Biomes;
++import net.minecraft.world.level.block.Block;
++import net.minecraft.world.level.block.Blocks;
++import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.level.chunk.EmptyLevelChunk;
++import net.minecraft.world.level.chunk.GlobalPalette;
++import net.minecraft.world.level.chunk.LevelChunk;
++import net.minecraft.world.level.chunk.LevelChunkSection;
++import net.minecraft.world.level.chunk.MissingPaletteEntryException;
++import net.minecraft.world.level.chunk.Palette;
++import net.minecraft.world.level.chunk.PaletteResize;
++
++/** Mode 4: conceal undiscovered underground cells with client-only solid terrain. */
++public final class ChunkPacketBlockControllerCave extends ChunkPacketBlockController {
++    private static final Palette<BlockState> GLOBAL_BLOCKSTATE_PALETTE = new GlobalPalette<>(Block.BLOCK_STATE_REGISTRY);
++    private static final int REVEAL_RADIUS = 24;
++    private static final int REVEAL_BUDGET = 32768;
++    private static final int ENTRANCE_DEPTH = 12;
++    private static final int REFRESHES_PER_TICK = 2;
++    private final Level level;
++    private final int minY;
++    private final int maxY;
++    private final boolean usePermission;
++    private final boolean lavaObscures;
++    private final int updateRadius;
++    private final boolean[] legacySolidGlobal = new boolean[Block.BLOCK_STATE_REGISTRY.size()];
++    private final boolean[] legacyCandidateGlobal = new boolean[Block.BLOCK_STATE_REGISTRY.size()];
++    private final Cache<Long, Snapshot> snapshots = CacheBuilder.newBuilder().maximumSize(256)
++        .expireAfterAccess(Duration.ofSeconds(30)).build();
++    private final Cache<Long, LevelChunk> sources = CacheBuilder.newBuilder().maximumSize(256)
++        .expireAfterAccess(Duration.ofSeconds(60)).build();
++    private final Cache<Long, BitSet> exterior = CacheBuilder.newBuilder().maximumSize(256)
++        .expireAfterAccess(Duration.ofSeconds(30)).build();
++    private final Cache<Long, Long> revisions = CacheBuilder.newBuilder().maximumSize(4096).build();
++    private final Cache<Long, Long> geometryRevisions = CacheBuilder.newBuilder().maximumSize(4096).build();
++    private final java.util.concurrent.atomic.AtomicLong revisionSequence = new java.util.concurrent.atomic.AtomicLong();
++
++    public ChunkPacketBlockControllerCave(Level level) {
++        this(level, level.paperConfig().anticheat.antiXray.maxBlockHeight, level.paperConfig().anticheat.antiXray.usePermission);
++    }
++
++    ChunkPacketBlockControllerCave(Level level, int maxHeight, boolean usePermission) {
++        this.level = level;
++        this.minY = level.getMinY();
++        this.maxY = Math.min(level.getMaxY() + 1, maxHeight >> 4 << 4);
++        this.usePermission = usePermission;
++        WorldConfiguration.Anticheat.AntiXray config = level.paperConfig().anticheat.antiXray;
++        this.lavaObscures = config.lavaObscures;
++        this.updateRadius = config.updateRadius;
++
++        EmptyLevelChunk emptyChunk = new EmptyLevelChunk(level, new ChunkPos(0, 0),
++            MinecraftServer.getServer().registryAccess().lookupOrThrow(Registries.BIOME).getOrThrow(Biomes.PLAINS));
++        BlockPos zeroPos = BlockPos.ZERO;
++        for (int id = 0; id < this.legacySolidGlobal.length; id++) {
++            BlockState block = GLOBAL_BLOCKSTATE_PALETTE.valueFor(id);
++            if (block == null) continue;
++            boolean solid = block.isRedstoneConductor(emptyChunk, zeroPos)
++                && !block.is(Blocks.SPAWNER) && !block.is(Blocks.BARRIER) && !block.is(Blocks.SHULKER_BOX)
++                && !block.is(Blocks.SLIME_BLOCK) && !block.is(Blocks.MANGROVE_ROOTS)
++                || this.lavaObscures && block == Blocks.LAVA.defaultBlockState();
++            this.legacySolidGlobal[id] = solid;
++            this.legacyCandidateGlobal[id] = solid && !block.is(BlockTags.LOGS) && !block.is(BlockTags.LEAVES);
++        }
++    }
++
++    @Override
++    public boolean shouldModify(ServerPlayer player, LevelChunk chunk) {
++        return !bypass(player);
++    }
++
++    private boolean bypass(ServerPlayer player) {
++        return this.usePermission && player.getBukkitEntity().hasPermission("paper.antixray.bypass");
++    }
++
++    @Override
++    public boolean shouldTrackEntity(ServerPlayer player, net.minecraft.world.entity.Entity entity) {
++        return shouldTrackEntity(player, entity, player.connection.caveVisibility);
++    }
++
++    boolean shouldTrackEntity(ServerPlayer player, net.minecraft.world.entity.Entity entity, CavePlayerState state) {
++        synchronized (state) {
++            state.reset(this);
++            return bypass(player) || CaveEffectFilter.protectedEntity(player, entity.getId()) || visible(state, entity.blockPosition());
++        }
++    }
++
++    private Snapshot snapshot(LevelChunk chunk) {
++        long key = chunk.getPos().pack();
++        Snapshot result = this.snapshots.getIfPresent(key);
++        if (result != null && result.source == chunk && result.revision == geometryRevision(key)) return result;
++        if (this.sources.getIfPresent(key) != chunk) {
++            this.sources.put(key, chunk);
++            invalidateExterior(chunk.getPos().x(), chunk.getPos().z(), false);
++        }
++        long revision = geometryRevision(key);
++        // PalettedContainer writes synchronize on the container. Never read mutable neighbor palettes in a flood fill.
++        LevelChunkSection[] sections = copySections(chunk);
++        int height = this.level.getHeight();
++        BitSet open = new BitSet(height * 256);
++        BitSet sky = new BitSet(height * 256);
++        BitSet legacySolid = new BitSet(height * 256);
++        BitSet legacyCandidate = new BitSet(height * 256);
++        boolean endVoid = this.level.getWorld().getEnvironment() == org.bukkit.World.Environment.THE_END;
++        for (int z = 0; z < 16; z++) {
++            for (int x = 0; x < 16; x++) {
++                // Open space above the Nether roof is exterior too, despite having no skylight.
++                boolean covered = false;
++                for (int relativeY = height - 1; relativeY >= 0; relativeY--) {
++                    BlockState block = sections[relativeY >> 4].getBlockState(x, relativeY & 15, z);
++                    int blockIndex = relativeY * 256 + z * 16 + x;
++                    if (legacySolid(block)) legacySolid.set(blockIndex);
++                    if (legacyCandidate(block)) legacyCandidate.set(blockIndex);
++                    if (block.isSolidRender()) covered = true;
++                    else {
++                        int index = relativeY * 256 + z * 16 + x;
++                        open.set(index);
++                        if (!covered) sky.set(index);
++                    }
++                }
++                if (endVoid) {
++                    // Preserve the void beneath End islands instead of inventing solid columns under them.
++                    for (int relativeY = 0; relativeY < height; relativeY++) {
++                        if (sections[relativeY >> 4].getBlockState(x, relativeY & 15, z).isSolidRender()) break;
++                        sky.set(relativeY * 256 + z * 16 + x);
++                    }
++                }
++            }
++        }
++        result = new Snapshot(chunk, open, sky, legacySolid, legacyCandidate, revision);
++        this.snapshots.put(key, result);
++        if (revision != geometryRevision(key)) this.snapshots.invalidate(key);
++        return result;
++    }
++
++    private static LevelChunkSection[] copySections(LevelChunk chunk) {
++        LevelChunkSection[] sections = chunk.getSections().clone();
++        for (int i = 0; i < sections.length; i++) {
++            LevelChunkSection section = sections[i];
++            synchronized (section.getStates()) {
++                sections[i] = section.copy();
++            }
++            sections[i].recalcBlockCounts();
++        }
++        return sections;
++    }
++
++    /** Applies the old mode-4 occlusion test to the cave packet view, keeping concealed blocks solid. */
++    private BitSet applyLegacyOcclusion(CavePlayerState state, LevelChunk chunk,
++                                        LevelChunkSection[] sections, BitSet visibleCells) {
++        BitSet replace = new BitSet(this.level.getHeight() * 256);
++        int chunkX = chunk.getPos().getMinBlockX();
++        int chunkZ = chunk.getPos().getMinBlockZ();
++        for (int y = this.minY; y < this.maxY; y++) {
++            int sectionIndex = (y - this.minY) >> 4;
++            int localY = y & 15;
++            LevelChunkSection section = sections[sectionIndex];
++            for (int z = 0; z < 16; z++) {
++                for (int x = 0; x < 16; x++) {
++                    int worldX = chunkX + x;
++                    int worldZ = chunkZ + z;
++                    if (!visible(visibleCells, worldX, y, worldZ)) continue;
++                    BlockState block = section.getBlockState(x, localY, z);
++                    if (!legacyCandidate(block)) continue;
++                    BlockPos pos = new BlockPos(worldX, y, worldZ);
++                    if (packetSolid(state, chunk.getPos().pack(), visibleCells, sections, pos.relative(Direction.WEST))
++                        && packetSolid(state, chunk.getPos().pack(), visibleCells, sections, pos.relative(Direction.EAST))
++                        && packetSolid(state, chunk.getPos().pack(), visibleCells, sections, pos.below())
++                        && packetSolid(state, chunk.getPos().pack(), visibleCells, sections, pos.above())
++                        && packetSolid(state, chunk.getPos().pack(), visibleCells, sections, pos.relative(Direction.NORTH))
++                        && packetSolid(state, chunk.getPos().pack(), visibleCells, sections, pos.relative(Direction.SOUTH))) {
++                        replace.set((y - this.minY) * 256 + z * 16 + x);
++                    }
++                }
++            }
++        }
++        for (int index = replace.nextSetBit(0); index >= 0; index = replace.nextSetBit(index + 1)) {
++            int y = this.minY + (index >> 8);
++            int z = (index >> 4) & 15;
++            int x = index & 15;
++            sections[(y - this.minY) >> 4].setBlockState(x, y & 15, z, replacement(y), false);
++        }
++        for (LevelChunkSection section : sections) section.recalcBlockCounts();
++        return replace;
++    }
++
++    private boolean packetSolid(CavePlayerState state, long activeChunk,
++                                BitSet activeCells, LevelChunkSection[] activeSections, BlockPos pos) {
++        if (pos.getY() < this.minY || pos.getY() >= this.maxY) return false;
++        long key = ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4);
++        if (key == activeChunk) {
++            if (!visible(activeCells, pos.getX(), pos.getY(), pos.getZ())) return legacySolid(replacement(pos.getY()));
++            return legacySolid(activeSections[(pos.getY() - this.minY) >> 4]
++                .getBlockState(pos.getX() & 15, pos.getY() & 15, pos.getZ() & 15));
++        }
++        CavePlayerState.View view = state.sent.get(key);
++        if (view == null || !view.bypass() && !visible(view.cells(), pos.getX(), pos.getY(), pos.getZ())) {
++            return legacySolid(replacement(pos.getY()));
++        }
++        LevelChunk chunk = this.level.getChunkIfLoaded(pos.getX() >> 4, pos.getZ() >> 4);
++        if (chunk == null) return legacySolid(replacement(pos.getY()));
++        return snapshot(chunk).legacySolid.get((pos.getY() - this.minY) * 256 + (pos.getZ() & 15) * 16 + (pos.getX() & 15));
++    }
++
++    private boolean packetSolid(CavePlayerState state, BlockPos pos) {
++        return packetSolid(state, Long.MIN_VALUE, null, null, pos);
++    }
++
++    private boolean legacySolid(BlockState state) {
++        try {
++            return this.legacySolidGlobal[GLOBAL_BLOCKSTATE_PALETTE.idFor(state, PaletteResize.noResizeExpected())];
++        } catch (MissingPaletteEntryException exception) {
++            return false;
++        }
++    }
++
++    private boolean legacyCandidate(BlockState state) {
++        try {
++            return this.legacyCandidateGlobal[GLOBAL_BLOCKSTATE_PALETTE.idFor(state, PaletteResize.noResizeExpected())];
++        } catch (MissingPaletteEntryException exception) {
++            return false;
++        }
++    }
++
++    private BlockState filterVisibleState(CavePlayerState state, BlockPos pos, BlockState block) {
++        return legacyOccluded(state, pos, block) ? replacement(pos.getY()) : block;
++    }
++
++    private boolean legacyOccluded(CavePlayerState state, BlockPos pos, BlockState block) {
++        if (pos.getY() < this.minY || pos.getY() >= this.maxY || !legacyCandidate(block)) return false;
++        return packetSolid(state, pos.relative(Direction.WEST))
++            && packetSolid(state, pos.relative(Direction.EAST))
++            && packetSolid(state, pos.below())
++            && packetSolid(state, pos.above())
++            && packetSolid(state, pos.relative(Direction.NORTH))
++            && packetSolid(state, pos.relative(Direction.SOUTH));
++    }
++
++    private boolean legacyOccludedAt(CavePlayerState state, BlockPos pos) {
++        return packetCandidate(state, pos) && packetSolid(state, pos.relative(Direction.WEST))
++            && packetSolid(state, pos.relative(Direction.EAST))
++            && packetSolid(state, pos.below())
++            && packetSolid(state, pos.above())
++            && packetSolid(state, pos.relative(Direction.NORTH))
++            && packetSolid(state, pos.relative(Direction.SOUTH));
++    }
++
++    private boolean packetCandidate(CavePlayerState state, BlockPos pos) {
++        if (pos.getY() < this.minY || pos.getY() >= this.maxY || !visible(state, pos)) return false;
++        LevelChunk chunk = this.level.getChunkIfLoaded(pos.getX() >> 4, pos.getZ() >> 4);
++        return chunk != null && snapshot(chunk).legacyCandidate.get(
++            (pos.getY() - this.minY) * 256 + (pos.getZ() & 15) * 16 + (pos.getX() & 15));
++    }
++
++    private void invalidateExterior(int chunkX, int chunkZ, boolean terrainChanged) {
++        for (int dz = -1; dz <= 1; dz++) {
++            for (int dx = -1; dx <= 1; dx++) {
++                this.exterior.invalidate(ChunkPos.pack(chunkX + dx, chunkZ + dz));
++                if (terrainChanged) this.revisions.put(ChunkPos.pack(chunkX + dx, chunkZ + dz), this.revisionSequence.incrementAndGet());
++            }
++        }
++    }
++
++    private Grid grid(int baseX, int baseY, int baseZ, int width, int height, int depth, boolean includeSky) {
++        BitSet open = new BitSet(width * height * depth);
++        BitSet sky = new BitSet(width * height * depth);
++        for (int cz = baseZ >> 4; cz <= (baseZ + depth - 1) >> 4; cz++) {
++            for (int cx = baseX >> 4; cx <= (baseX + width - 1) >> 4; cx++) {
++                LevelChunk chunk = this.level.getChunkIfLoaded(cx, cz);
++                if (chunk == null) continue; // Unknown chunks stay closed; never cause loads or generation.
++                Snapshot snapshot = snapshot(chunk);
++                for (int y = Math.max(baseY, this.minY); y < Math.min(baseY + height, this.minY + this.level.getHeight()); y++) {
++                    for (int z = Math.max(baseZ, cz << 4); z < Math.min(baseZ + depth, (cz + 1) << 4); z++) {
++                        for (int x = Math.max(baseX, cx << 4); x < Math.min(baseX + width, (cx + 1) << 4); x++) {
++                            int local = (y - this.minY) * 256 + (z & 15) * 16 + (x & 15);
++                            int index = ((y - baseY) * depth + z - baseZ) * width + x - baseX;
++                            if (snapshot.open.get(local)) open.set(index);
++                            if (includeSky && snapshot.sky.get(local)) sky.set(index);
++                        }
++                    }
++                }
++            }
++        }
++        return new Grid(baseX, baseY, baseZ, width, height, depth, open, sky);
++    }
++
++    private BitSet exterior(LevelChunk chunk) {
++        long key = chunk.getPos().pack();
++        // Ensure a reloaded chunk cannot inherit an old topology at the same coordinates.
++        snapshot(chunk);
++        BitSet result = this.exterior.getIfPresent(key);
++        if (result != null) return result;
++        long revision = revision(key);
++        Grid grid = grid(chunk.getPos().getMinBlockX() - 16, this.minY, chunk.getPos().getMinBlockZ() - 16,
++            48, this.level.getHeight(), 48, true);
++        BitSet visible = CaveVisibility.exterior(grid.open, grid.sky, grid.width, grid.height, grid.depth, ENTRANCE_DEPTH);
++        result = CaveVisibility.projectToChunk(visible, grid.x, grid.y, grid.z, grid.width, grid.height, grid.depth,
++            this.minY, this.maxY, chunk.getPos().getMinBlockX(), chunk.getPos().getMinBlockZ());
++        this.exterior.put(key, result);
++        if (revision != revision(key)) this.exterior.invalidate(key);
++        return result;
++    }
++
++    private Map<Long, BitSet> nearby(ServerPlayer player) {
++        BlockPos pos = player.blockPosition();
++        int width = REVEAL_RADIUS * 2 + 1;
++        Grid grid = grid(pos.getX() - REVEAL_RADIUS, pos.getY() - REVEAL_RADIUS, pos.getZ() - REVEAL_RADIUS,
++            width, width, width, false);
++        BitSet seeds = new BitSet();
++        // Multiple seeds handle swimming, crawling and a player whose feet are inside a non-full block.
++        for (int y = REVEAL_RADIUS - 1; y <= REVEAL_RADIUS + 2; y++) {
++            for (int z = REVEAL_RADIUS - 1; z <= REVEAL_RADIUS + 1; z++) {
++                for (int x = REVEAL_RADIUS - 1; x <= REVEAL_RADIUS + 1; x++) {
++                    seeds.set((y * width + z) * width + x);
++                }
++            }
++        }
++        BitSet visited = CaveVisibility.flood(grid.open, seeds, width, width, width, REVEAL_RADIUS, REVEAL_BUDGET);
++        Map<Long, BitSet> cells = toCells(grid, visited);
++        // Safety shell prevents fake client collision when digging, falling or arriving by teleport.
++        addSafety(cells, pos);
++        return cells;
++    }
++
++    private void addSafety(Map<Long, BitSet> cells, BlockPos pos) {
++        for (int y = pos.getY() - 8; y <= pos.getY() + 8; y += 4) {
++            for (int z = pos.getZ() - 8; z <= pos.getZ() + 8; z += 4) {
++                for (int x = pos.getX() - 8; x <= pos.getX() + 8; x += 4) addCell(cells, x, y, z);
++            }
++        }
++    }
++
++    private Map<Long, BitSet> toCells(Grid grid, BitSet visited) {
++        Map<Long, BitSet> result = new HashMap<>();
++        long[] words = visited.toLongArray();
++        for (int y = Math.max(Math.floorDiv(grid.y, 4) * 4, this.minY - 4); y < Math.min(grid.y + grid.height, this.maxY + 4); y += 4) {
++            for (int z = Math.floorDiv(grid.z, 4) * 4; z < grid.z + grid.depth; z += 4) {
++                for (int x = Math.floorDiv(grid.x, 4) * 4; x < grid.x + grid.width; x += 4) {
++                    boolean found = false;
++                    for (int by = Math.max(y, grid.y); by < Math.min(y + 4, grid.y + grid.height) && !found; by++) {
++                        for (int bz = Math.max(z, grid.z); bz < Math.min(z + 4, grid.z + grid.depth); bz++) {
++                            int start = ((by - grid.y) * grid.depth + bz - grid.z) * grid.width + Math.max(x, grid.x) - grid.x;
++                            int end = start + Math.min(x + 4, grid.x + grid.width) - Math.max(x, grid.x);
++                            if (CaveVisibility.anySet(words, start, end)) { found = true; break; }
++                        }
++                    }
++                    if (!found) continue;
++                    addCell(result, x, y, z);
++                    // Preserve walls around revealed air cells across section and chunk boundaries.
++                    addCell(result, x - 4, y, z); addCell(result, x + 4, y, z);
++                    addCell(result, x, y - 4, z); addCell(result, x, y + 4, z);
++                    addCell(result, x, y, z - 4); addCell(result, x, y, z + 4);
++                }
++            }
++        }
++        return result;
++    }
++
++    private void addCell(Map<Long, BitSet> result, int x, int y, int z) {
++        if (y < this.minY || y >= this.maxY) return;
++        result.computeIfAbsent(ChunkPos.pack(x >> 4, z >> 4), ignored -> new BitSet())
++            .set(CaveVisibility.cellIndex(x, y, z, this.minY));
++    }
++
++    @Override
++    public void tickPlayer(ServerPlayer player) {
++        CavePlayerState state = player.connection.caveVisibility;
++        synchronized (state) {
++            state.reset(this);
++            if (state.ticks++ % 5 == 0) {
++                BlockPos position = player.blockPosition();
++                boolean moved = state.lastX == Integer.MIN_VALUE || Math.abs((long)position.getX() - state.lastX)
++                    + Math.abs((long)position.getY() - state.lastY) + Math.abs((long)position.getZ() - state.lastZ) >= 2;
++                boolean dirty = state.sent.entrySet().stream().anyMatch(entry -> state.nearby.containsKey(entry.getKey())
++                    && entry.getValue().revision() != revision(entry.getKey()));
++                if (moved || dirty || state.ticks % 40 == 1) {
++                    state.nearby = nearby(player);
++                    state.lastX = position.getX();
++                    state.lastY = position.getY();
++                    state.lastZ = position.getZ();
++                }
++                boolean bypass = bypass(player);
++                for (Map.Entry<Long, CavePlayerState.View> entry : state.sent.entrySet()) {
++                    BitSet requested = state.nearby.get(entry.getKey());
++                    if (entry.getValue().bypass() != bypass || entry.getValue().revision() != revision(entry.getKey())
++                        || (requested != null && !contains(entry.getValue().cells(), requested))) {
++                        state.queue(entry.getKey());
++                    }
++                }
++            }
++            // Update the collision safety shell every tick, including while falling or riding.
++            Map<Long, BitSet> safety = new HashMap<>();
++            addSafety(safety, player.blockPosition());
++            net.minecraft.world.phys.Vec3 motion = player.getDeltaMovement();
++            addSafety(safety, player.blockPosition().offset(
++                (int)Math.clamp(motion.x * 3, -12, 12), (int)Math.clamp(motion.y * 3, -12, 12),
++                (int)Math.clamp(motion.z * 3, -12, 12)));
++            Map<Long, BitSet> nearby = new HashMap<>(state.nearby);
++            for (Map.Entry<Long, BitSet> entry : safety.entrySet()) {
++                BitSet cells = (BitSet)entry.getValue().clone();
++                if (nearby.containsKey(entry.getKey())) cells.or(nearby.get(entry.getKey()));
++                nearby.put(entry.getKey(), cells);
++                CavePlayerState.View sent = state.sent.get(entry.getKey());
++                if (sent != null && !sent.bypass() && !contains(sent.cells(), cells) && state.queued.add(entry.getKey())) {
++                    state.pending.addFirst(entry.getKey());
++                }
++            }
++            state.nearby = nearby;
++            for (int i = 0; i < REFRESHES_PER_TICK && !state.pending.isEmpty(); i++) {
++                long key = state.pending.removeFirst();
++                state.queued.remove(key);
++                if (!io.papermc.paper.FeatureHooks.isChunkSent(player, key)) continue;
++                LevelChunk chunk = this.level.getChunkIfLoaded(ChunkPos.getX(key), ChunkPos.getZ(key));
++                if (chunk == null) continue;
++                refresh(player, state, chunk);
++            }
++        }
++    }
++
++    private void refresh(ServerPlayer player, CavePlayerState state, LevelChunk chunk) {
++        long key = chunk.getPos().pack();
++        CavePlayerState.View previous = state.sent.get(key);
++        if (previous == null || previous.bypass() != bypass(player)) {
++            player.connection.send(new ClientboundLevelChunkWithLightPacket(chunk, this.level.getLightEngine(), null, null, false));
++            return;
++        }
++        if (previous.bypass()) return;
++        long revision = revision(key);
++        BitSet cells = (BitSet)previous.cells().clone();
++        if (previous.revision() != revision) cells.or(exterior(chunk));
++        BitSet nearby = state.nearby.get(key);
++        if (nearby != null) cells.or(nearby);
++        BitSet added = (BitSet)cells.clone();
++        added.andNot(previous.cells());
++        state.sent.put(key, new CavePlayerState.View(cells, false, revision));
++        if (added.isEmpty()) return;
++
++        BitSet lightSections = new BitSet();
++        int minLightSection = this.level.getLightEngine().getMinLightSection();
++        for (int index = 0; index < chunk.getSections().length; index++) {
++            int firstCell = index * 64;
++            int nextCell = added.nextSetBit(firstCell);
++            if (nextCell < 0 || nextCell >= firstCell + 64) continue;
++            LevelChunkSection source = chunk.getSections()[index];
++            LevelChunkSection copy;
++            synchronized (source.getStates()) { copy = source.copy(); }
++            Short2ObjectLinkedOpenHashMap<BlockState> updates = new Short2ObjectLinkedOpenHashMap<>();
++            for (int cell = nextCell; cell >= 0 && cell < firstCell + 64; cell = added.nextSetBit(cell + 1)) {
++                int local = cell - firstCell;
++                int x0 = (local & 3) * 4;
++                int z0 = ((local >> 2) & 3) * 4;
++                int y0 = (local >> 4) * 4;
++                for (int y = y0; y < y0 + 4; y++) {
++                    for (int z = z0; z < z0 + 4; z++) {
++                        for (int x = x0; x < x0 + 4; x++) {
++                            BlockPos pos = new BlockPos(chunk.getPos().getMinBlockX() + x, this.minY + index * 16 + y,
++                                chunk.getPos().getMinBlockZ() + z);
++                            updates.put((short)((x << 8) | (z << 4) | y), filterVisibleState(state, pos, copy.getBlockState(x, y, z)));
++                        }
++                    }
++                }
++            }
++            int sectionY = (this.minY >> 4) + index;
++            player.connection.send(new ClientboundSectionBlocksUpdatePacket(SectionPos.of(chunk.getPos(), sectionY), updates));
++            lightSections.set(sectionY - minLightSection);
++        }
++        player.connection.send(new ClientboundLightUpdatePacket(chunk.getPos(), this.level.getLightEngine(), lightSections, lightSections));
++        for (Map.Entry<BlockPos, net.minecraft.world.level.block.entity.BlockEntity> entry : chunk.getBlockEntities().entrySet()) {
++            BlockPos pos = entry.getKey();
++            if (pos.getY() < this.minY || pos.getY() >= this.maxY
++                || !added.get(CaveVisibility.cellIndex(pos.getX(), pos.getY(), pos.getZ(), this.minY))
++                || legacyOccludedAt(state, pos)) continue;
++            Packet<?> update = entry.getValue().getUpdatePacket();
++            if (update != null) player.connection.send(update);
++        }
++    }
++
++    private static boolean contains(BitSet existing, BitSet requested) {
++        BitSet difference = (BitSet)requested.clone();
++        difference.andNot(existing);
++        return difference.isEmpty();
++    }
++
++    private long revision(long key) {
++        Long value = this.revisions.getIfPresent(key);
++        return value == null ? 0L : value;
++    }
++
++    private long geometryRevision(long key) {
++        Long value = this.geometryRevisions.getIfPresent(key);
++        return value == null ? 0L : value;
++    }
++
++    @Override
++    public Packet<?> filterPacket(ServerPlayer player, Packet<?> packet) {
++        return filterPacket(player, packet, player.connection.caveVisibility);
++    }
++
++    Packet<?> filterPacket(ServerPlayer player, Packet<?> packet, CavePlayerState state) {
++        synchronized (state) {
++            state.reset(this);
++            if (packet instanceof ClientboundRespawnPacket || packet instanceof ClientboundLoginPacket) {
++                state.clear();
++                return packet;
++            }
++            if (packet instanceof ClientboundForgetLevelChunkPacket forget) {
++                long key = forget.pos().pack();
++                state.sent.remove(key);
++                state.queued.remove(key);
++                state.pending.remove(key);
++                Map<Long, BitSet> next = new HashMap<>(state.nearby);
++                next.remove(key);
++                state.nearby = next;
++                return packet;
++            }
++            if (packet instanceof ClientboundBundlePacket bundle) {
++                java.util.List<Packet<? super ClientGamePacketListener>> children = new java.util.ArrayList<>();
++                for (Packet<? super ClientGamePacketListener> child : bundle.subPackets()) {
++                    Packet<?> filtered = filterPacket(player, child, state);
++                    if (filtered != null) children.add(gamePacket(filtered));
++                }
++                return children.isEmpty() ? null : new ClientboundBundlePacket(children);
++            }
++            boolean bypass = bypass(player);
++            if (packet instanceof ClientboundLevelChunkWithLightPacket chunkPacket) {
++                LevelChunk chunk = this.level.getChunkIfLoaded(chunkPacket.getX(), chunkPacket.getZ());
++                if (chunk == null) return null;
++                long key = chunk.getPos().pack();
++                if (bypass) {
++                    state.sent.put(key, new CavePlayerState.View(new BitSet(), true, revision(key)));
++                    return chunkPacket;
++                }
++                long revision = revision(key);
++                BitSet cells = (BitSet)exterior(chunk).clone();
++                CavePlayerState.View previous = state.sent.get(key);
++                if (previous != null && !previous.bypass()) cells.or(previous.cells());
++                BitSet nearby = state.nearby.get(key);
++                if (nearby != null) cells.or(nearby);
++                // Include the current safety shell even before the first player tick or after a teleport.
++                Map<Long, BitSet> safety = new HashMap<>();
++                addSafety(safety, player.blockPosition());
++                if (safety.containsKey(key)) cells.or(safety.get(key));
++                // Always serialize current block states, even if the topology cache is still valid.
++                LevelChunkSection[] sections = copySections(chunk);
++                for (int section = 0; section < sections.length; section++) {
++                    int bottom = this.minY + section * 16;
++                    if (bottom >= this.maxY) continue;
++                    LevelChunkSection copy = sections[section];
++                    for (int y = 0; y < 16; y++) {
++                        BlockState replacement = replacement(bottom + y);
++                        for (int z = 0; z < 16; z++) {
++                            for (int x = 0; x < 16; x++) {
++                                if (!visible(cells, x, bottom + y, z)) copy.setBlockState(x, y, z, replacement, false);
++                            }
++                        }
++                    }
++                    sections[section] = copy;
++                }
++                BitSet legacyReplaced = applyLegacyOcclusion(state, chunk, sections, cells);
++                ClientboundLevelChunkPacketData data = new ClientboundLevelChunkPacketData(chunk, sections,
++                    pos -> visible(cells, pos.getX(), pos.getY(), pos.getZ())
++                        && (pos.getY() < this.minY || pos.getY() >= this.maxY
++                            || !legacyReplaced.get((pos.getY() - this.minY) * 256 + (pos.getZ() & 15) * 16 + (pos.getX() & 15))));
++                ClientboundLightUpdatePacketData light = maskLight(chunkPacket.getLightData(), cells);
++                state.sent.put(key, new CavePlayerState.View(cells, false, revision));
++                return new ClientboundLevelChunkWithLightPacket(chunkPacket, data, light);
++            }
++            packet = CaveEffectFilter.filter(this, player, packet, state, bypass);
++            if (packet == null || bypass) return packet;
++            if (packet instanceof ClientboundBlockUpdatePacket update) {
++                BlockPos pos = update.getPos();
++                return new ClientboundBlockUpdatePacket(pos, visible(state, pos)
++                    ? filterVisibleState(state, pos, update.getBlockState()) : replacement(pos.getY()));
++            }
++            if (packet instanceof ClientboundSectionBlocksUpdatePacket updates) {
++                Short2ObjectLinkedOpenHashMap<BlockState> changes = new Short2ObjectLinkedOpenHashMap<>();
++                SectionPos[] section = new SectionPos[1];
++                updates.runUpdates((pos, block) -> {
++                    section[0] = SectionPos.of(pos);
++                    changes.put(SectionPos.sectionRelativePos(pos), visible(state, pos)
++                        ? filterVisibleState(state, pos, block) : replacement(pos.getY()));
++                });
++                return section[0] == null ? packet : new ClientboundSectionBlocksUpdatePacket(section[0], changes);
++            }
++            if (packet instanceof ClientboundBlockEntityDataPacket entity
++                && (!visible(state, entity.getPos()) || legacyOccludedAt(state, entity.getPos()))) return null;
++            if (packet instanceof ClientboundBlockEventPacket event
++                && (!visible(state, event.getPos()) || legacyOccludedAt(state, event.getPos()))) return null;
++            if (packet instanceof ClientboundBlockDestructionPacket destruction
++                && (!visible(state, destruction.getPos()) || legacyOccludedAt(state, destruction.getPos()))) return null;
++            if (packet instanceof ClientboundLevelEventPacket event
++                && (!visible(state, event.getPos()) || legacyOccludedAt(state, event.getPos()))) return null;
++            if (packet instanceof ClientboundLightUpdatePacket light) {
++                CavePlayerState.View view = state.sent.get(ChunkPos.pack(light.getX(), light.getZ()));
++                BitSet cells = view == null ? new BitSet() : view.cells();
++                return new ClientboundLightUpdatePacket(light, maskLight(light.getLightData(), cells));
++            }
++            return packet;
++        }
++    }
++
++    @SuppressWarnings("unchecked")
++    private static Packet<? super ClientGamePacketListener> gamePacket(Packet<?> packet) {
++        return (Packet<? super ClientGamePacketListener>)packet;
++    }
++
++    private ClientboundLightUpdatePacketData maskLight(ClientboundLightUpdatePacketData light, BitSet cells) {
++        return light.copyWithMask(index -> visible(cells, index & 15, index >> 8, (index >> 4) & 15),
++            this.level.getLightEngine().getMinLightSection());
++    }
++
++    private boolean visible(BitSet cells, int x, int y, int z) {
++        return CaveVisibility.visible(cells, x, y, z, this.minY, this.maxY);
++    }
++
++    boolean visible(CavePlayerState state, BlockPos pos) {
++        if (pos.getY() < this.minY || pos.getY() >= this.maxY) return true;
++        CavePlayerState.View view = state.sent.get(ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4));
++        return view != null && (view.bypass() || visible(view.cells(), pos.getX(), pos.getY(), pos.getZ()));
++    }
++
++    private BlockState replacement(int y) {
++        return switch (this.level.getWorld().getEnvironment()) {
++            case NETHER -> Blocks.NETHERRACK.defaultBlockState();
++            case THE_END -> Blocks.END_STONE.defaultBlockState();
++            default -> (y < 0 ? Blocks.DEEPSLATE : Blocks.STONE).defaultBlockState();
++        };
++    }
++
++    @Override
++    public void onBlockChange(Level level, BlockPos pos, BlockState newState, BlockState oldState, @Block.UpdateFlags int flags, int depth) {
++        if (oldState == null || oldState == newState) return;
++        long key = ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4);
++        // The cached topology is still valid for same-opacity edits, but legacy solid masks are not.
++        this.snapshots.invalidate(key);
++        if (oldState.isSolidRender() != newState.isSolidRender()) {
++            this.geometryRevisions.put(key, this.revisionSequence.incrementAndGet());
++            invalidateExterior(pos.getX() >> 4, pos.getZ() >> 4, true);
++        }
++        if (legacySolid(oldState) && !legacySolid(newState) && pos.getY() <= this.maxY + this.updateRadius - 1) {
++            updateNearbyBlocks(level, pos);
++        }
++    }
++
++    @Override
++    public void onPlayerLeftClickBlock(Level level, BlockPos pos, ServerboundPlayerActionPacket.Action action,
++                                      Direction direction, int worldHeight, int sequence) {
++        if (pos.getY() <= this.maxY + this.updateRadius - 1) updateNearbyBlocks(level, pos);
++    }
++
++    private void updateNearbyBlocks(Level level, BlockPos origin) {
++        if (this.updateRadius <= 0) return;
++        int radius = this.updateRadius == 1 ? 1 : 2;
++        for (int dy = -radius; dy <= radius; dy++) {
++            for (int dz = -radius; dz <= radius; dz++) {
++                for (int dx = -radius; dx <= radius; dx++) {
++                    int distance = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
++                    if (distance == 0 || distance > radius) continue;
++                    BlockPos pos = origin.offset(dx, dy, dz);
++                    if (pos.getY() < this.minY || pos.getY() >= this.maxY) continue;
++                    LevelChunk chunk = level.getChunkIfLoaded(pos.getX() >> 4, pos.getZ() >> 4);
++                    if (chunk != null && snapshot(chunk).legacyCandidate.get(
++                        (pos.getY() - this.minY) * 256 + (pos.getZ() & 15) * 16 + (pos.getX() & 15))) {
++                        ((ServerLevel)level).getChunkSource().blockChanged(pos);
++                    }
++                }
++            }
++        }
++    }
++
++    private record Snapshot(LevelChunk source, BitSet open, BitSet sky, BitSet legacySolid,
++                            BitSet legacyCandidate, long revision) {
++    }
++
++    private record Grid(int x, int y, int z, int width, int height, int depth, BitSet open, BitSet sky) {
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/configuration/type/EngineMode.java b/src/main/java/io/papermc/paper/configuration/type/EngineMode.java
+index 7f8b68576..ee1a89b38 100644
+--- a/src/main/java/io/papermc/paper/configuration/type/EngineMode.java
++++ b/src/main/java/io/papermc/paper/configuration/type/EngineMode.java
+@@ -5,7 +5,7 @@ import org.spongepowered.configurate.serialize.ScalarSerializer;
+ 
+ public enum EngineMode {
+ 
+-    HIDE(1, "hide ores"), OBFUSCATE(2, "obfuscate"), OBFUSCATE_LAYER(3, "obfuscate layer");
++    HIDE(1, "hide ores"), OBFUSCATE(2, "obfuscate"), OBFUSCATE_LAYER(3, "obfuscate layer"), HIDE_AS_AIR(4, "conceal undiscovered caves");
+ 
+     public static final ScalarSerializer<EngineMode> SERIALIZER = new EngineModeSerializer();
+ 
+diff --git a/src/test/java/io/papermc/paper/antixray/CaveEffectsTest.java b/src/test/java/io/papermc/paper/antixray/CaveEffectsTest.java
+new file mode 100644
+index 000000000..34db604cf
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/antixray/CaveEffectsTest.java
+@@ -0,0 +1,211 @@
++package io.papermc.paper.antixray;
++
++import java.util.BitSet;
++import java.util.List;
++import java.util.Optional;
++import java.util.UUID;
++import net.minecraft.core.BlockPos;
++import net.minecraft.core.Holder;
++import net.minecraft.core.particles.ParticleTypes;
++import net.minecraft.network.protocol.Packet;
++import net.minecraft.network.protocol.game.*;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.sounds.SoundEvents;
++import net.minecraft.sounds.SoundSource;
++import net.minecraft.util.debug.DebugSubscriptions;
++import net.minecraft.util.random.WeightedList;
++import net.minecraft.world.damagesource.DamageType;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.entity.EntityTypes;
++import net.minecraft.world.entity.PositionMoveRotation;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.phys.Vec3;
++import org.bukkit.support.environment.VanillaFeature;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@VanillaFeature
++class CaveEffectsTest {
++    private ChunkPacketBlockControllerCave controller;
++    private ServerPlayer player;
++    private CavePlayerState state;
++    private static final BlockPos HIDDEN = new BlockPos(4, 8, 4);
++    private static final BlockPos VISIBLE = new BlockPos(4, 24, 4);
++
++    @BeforeEach
++    void setup() {
++        Level level = mock(Level.class);
++        when(level.getMinY()).thenReturn(0);
++        when(level.getMaxY()).thenReturn(31);
++        this.controller = new ChunkPacketBlockControllerCave(level, 32, false);
++        this.player = mock(ServerPlayer.class);
++        when(this.player.getId()).thenReturn(1);
++        when(this.player.getRootVehicle()).thenReturn(this.player);
++        when(this.player.getCamera()).thenReturn(this.player);
++        this.state = new CavePlayerState();
++        this.state.reset(this.controller);
++        BitSet cells = new BitSet();
++        cells.set(CaveVisibility.cellIndex(4, 24, 4, 0));
++        this.state.sent.put(0L, new CavePlayerState.View(cells, false, 0L));
++    }
++
++    private Packet<?> filter(Packet<?> packet) {
++        return this.controller.filterPacket(this.player, packet, this.state);
++    }
++
++    private ClientboundAddEntityPacket spawn(int id, BlockPos pos) {
++        return new ClientboundAddEntityPacket(id, UUID.randomUUID(), pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5,
++            0, 0, EntityTypes.ITEM, 0, Vec3.ZERO, 0);
++    }
++
++    private ClientboundLevelParticlesPacket particle(BlockPos pos) {
++        return new ClientboundLevelParticlesPacket(ParticleTypes.POOF, false, false,
++            pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5, 0, 0, 0, 0, 10);
++    }
++
++    @Test
++    void hiddenItemSpawnBundleAndMetadataAreDroppedTogether() {
++        ClientboundBundlePacket bundle = new ClientboundBundlePacket(List.of(spawn(99, HIDDEN),
++            new ClientboundSetEntityDataPacket(99, List.of()), new ClientboundSetEntityMotionPacket(99, Vec3.ZERO)));
++        assertNull(filter(bundle));
++        assertFalse(this.state.trackedEntities.contains(99));
++    }
++
++    @Test
++    void visibleItemSpawnRegistersBeforeBundledMetadataAndMovement() {
++        ClientboundBundlePacket bundle = new ClientboundBundlePacket(List.of(spawn(99, VISIBLE),
++            new ClientboundSetEntityDataPacket(99, List.of()), new ClientboundSetEntityMotionPacket(99, Vec3.ZERO)));
++        ClientboundBundlePacket filtered = (ClientboundBundlePacket)filter(bundle);
++        java.util.List<Packet<?>> packets = new java.util.ArrayList<>();
++        filtered.subPackets().forEach(packets::add);
++        assertEquals(3, packets.size());
++        assertTrue(this.state.trackedEntities.contains(99));
++    }
++
++    @Test
++    void entityTrackingChangesOnlyWhenSentMaskRevealsItsCell() {
++        Entity item = mock(net.minecraft.world.entity.item.ItemEntity.class);
++        when(item.getId()).thenReturn(99);
++        when(item.blockPosition()).thenReturn(HIDDEN);
++        assertFalse(this.controller.shouldTrackEntity(this.player, item, this.state));
++        BitSet cells = (BitSet)this.state.sent.get(0L).cells().clone();
++        cells.set(CaveVisibility.cellIndex(4, 8, 4, 0));
++        this.state.sent.put(0L, new CavePlayerState.View(cells, false, 0));
++        assertTrue(this.controller.shouldTrackEntity(this.player, item, this.state));
++        assertNotNull(filter(spawn(99, HIDDEN)));
++        when(item.blockPosition()).thenReturn(new BlockPos(12, 8, 12));
++        assertFalse(this.controller.shouldTrackEntity(this.player, item, this.state));
++    }
++
++    @Test
++    void removeAllowsRePairingAndClearsMetadataAndSoundPermission() {
++        filter(spawn(99, VISIBLE));
++        assertNotNull(filter(new ClientboundSetEntityDataPacket(99, List.of())));
++        ClientboundRemoveEntitiesPacket removal = new ClientboundRemoveEntitiesPacket(99);
++        assertSame(removal, filter(removal));
++        assertNull(filter(new ClientboundSetEntityDataPacket(99, List.of())));
++        assertNotNull(filter(spawn(99, VISIBLE)));
++    }
++
++    @Test
++    void particleAndPositionalSoundsFollowTheirOriginCell() {
++        assertNull(filter(particle(HIDDEN)));
++        var visible = particle(VISIBLE);
++        assertSame(visible, filter(visible));
++        var hiddenSound = new ClientboundSoundPacket(Holder.direct(SoundEvents.ITEM_PICKUP), SoundSource.BLOCKS, 4.5, 8, 4.5, 1, 1, 0);
++        var visibleSound = new ClientboundSoundPacket(Holder.direct(SoundEvents.ITEM_PICKUP), SoundSource.BLOCKS, 4.5, 24, 4.5, 1, 1, 0);
++        assertNull(filter(hiddenSound));
++        assertSame(visibleSound, filter(visibleSound));
++    }
++
++    @Test
++    void entitySoundsAndPickupAnimationCannotReferenceUnseenEntities() {
++        Entity item = mock(Entity.class); when(item.getId()).thenReturn(99);
++        var sound = new ClientboundSoundEntityPacket(Holder.direct(SoundEvents.ITEM_PICKUP), SoundSource.NEUTRAL, item, 1, 1, 0);
++        var pickup = new ClientboundTakeItemEntityPacket(99, 1, 1);
++        assertNull(filter(sound)); assertNull(filter(pickup));
++        filter(spawn(99, VISIBLE));
++        assertSame(sound, filter(sound)); assertSame(pickup, filter(pickup));
++        assertNull(filter(new ClientboundTakeItemEntityPacket(99, 100, 1)));
++    }
++
++    @Test
++    void unseenEntityMovementAndEffectsAreSuppressedButOwnPhysicsRemain() {
++        var movement = new ClientboundMoveEntityPacket.Pos(99, (short)1, (short)2, (short)3, false);
++        var position = new ClientboundEntityPositionSyncPacket(99, new PositionMoveRotation(Vec3.ZERO, Vec3.ZERO, 0, 0), false);
++        assertNull(filter(movement)); assertNull(filter(position));
++        assertNull(filter(new ClientboundHurtAnimationPacket(99, 30)));
++        var ownVelocity = new ClientboundSetEntityMotionPacket(1, new Vec3(0, 1, 0));
++        assertSame(ownVelocity, filter(ownVelocity));
++        filter(spawn(99, VISIBLE));
++        assertSame(movement, filter(movement)); assertSame(position, filter(position));
++    }
++
++    @Test
++    void hiddenPassengerIdsAreRemovedWithoutDroppingTheVehicleUpdate() {
++        filter(spawn(20, VISIBLE));
++        var passengers = new ClientboundSetPassengersPacket(20, new int[]{1, 99});
++        var filtered = (ClientboundSetPassengersPacket)filter(passengers);
++        assertArrayEquals(new int[]{1}, filtered.getPassengers());
++        assertArrayEquals(new int[]{1, 99}, passengers.getPassengers());
++        assertNull(filter(new ClientboundSetPassengersPacket(99, new int[]{1})));
++    }
++
++    @Test
++    void ownDamageNotificationPreservesDamageButRedactsHiddenAttackerPosition() {
++        var damage = new ClientboundDamageEventPacket(1, Holder.direct(new DamageType("test", 0)), 99, 100,
++            Optional.of(new Vec3(4.5, 8, 4.5)));
++        var filtered = (ClientboundDamageEventPacket)filter(damage);
++        assertEquals(1, filtered.entityId());
++        assertEquals(-1, filtered.sourceCauseId()); assertEquals(-1, filtered.sourceDirectId());
++        assertTrue(filtered.sourcePosition().isEmpty());
++        assertSame(damage.sourceType(), filtered.sourceType());
++    }
++
++    @Test
++    void explosionVisualsAreHiddenButPlayerKnockbackIsNotDiscarded() {
++        var hidden = new ClientboundExplodePacket(new Vec3(4.5, 8, 4.5), 4, 0, Optional.empty(),
++            ParticleTypes.EXPLOSION, SoundEvents.GENERIC_EXPLODE, WeightedList.of());
++        assertNull(filter(hidden));
++        var affectsPlayer = new ClientboundExplodePacket(hidden.center(), 4, 0, Optional.of(new Vec3(0, 1, 0)),
++            ParticleTypes.EXPLOSION, SoundEvents.GENERIC_EXPLODE, WeightedList.of());
++        assertSame(affectsPlayer, filter(affectsPlayer));
++    }
++
++    @Test
++    void vehicleAndCameraAreNeverRemovedFromTheirControllingPlayer() {
++        Entity vehicle = mock(Entity.class); when(vehicle.getId()).thenReturn(99);
++        when(vehicle.blockPosition()).thenReturn(HIDDEN);
++        when(this.player.getRootVehicle()).thenReturn(vehicle);
++        assertTrue(this.controller.shouldTrackEntity(this.player, vehicle, this.state));
++        assertNotNull(filter(spawn(99, HIDDEN)));
++        Entity camera = mock(Entity.class); when(camera.getId()).thenReturn(100);
++        when(this.player.getCamera()).thenReturn(camera);
++        assertTrue(this.controller.shouldTrackEntity(this.player, camera, this.state));
++    }
++
++    @Test
++    void debugUpdatesAndStateResetDoNotLeakHiddenIds() {
++        var hiddenBlock = new ClientboundDebugBlockValuePacket(HIDDEN, DebugSubscriptions.POIS.emptyUpdate());
++        var hiddenEntity = new ClientboundDebugEntityValuePacket(99, DebugSubscriptions.ENTITY_PATHS.emptyUpdate());
++        assertNull(filter(hiddenBlock)); assertNull(filter(hiddenEntity));
++        filter(spawn(99, VISIBLE));
++        assertSame(hiddenEntity, filter(hiddenEntity));
++        this.state.clear();
++        assertTrue(this.state.trackedEntities.isEmpty());
++        assertNull(filter(new ClientboundSetEntityDataPacket(99, List.of())));
++    }
++
++    @Test
++    void bypassAllowsEffectsWhileStillMaintainingEntityCleanup() {
++        var particle = particle(HIDDEN);
++        assertSame(particle, CaveEffectFilter.filter(this.controller, this.player, particle, this.state, true));
++        var spawn = spawn(99, HIDDEN);
++        assertSame(spawn, CaveEffectFilter.filter(this.controller, this.player, spawn, this.state, true));
++        assertTrue(this.state.trackedEntities.contains(99));
++        CaveEffectFilter.filter(this.controller, this.player, new ClientboundRemoveEntitiesPacket(99), this.state, true);
++        assertTrue(this.state.trackedEntities.isEmpty());
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/antixray/CavePacketTest.java b/src/test/java/io/papermc/paper/antixray/CavePacketTest.java
+new file mode 100644
+index 000000000..6f640ad24
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/antixray/CavePacketTest.java
+@@ -0,0 +1,383 @@
++package io.papermc.paper.antixray;
++
++import io.netty.buffer.Unpooled;
++import java.util.BitSet;
++import java.util.List;
++import java.util.Map;
++import net.minecraft.core.BlockPos;
++import net.minecraft.core.SectionPos;
++import net.minecraft.network.FriendlyByteBuf;
++import net.minecraft.network.protocol.game.*;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.block.Blocks;
++import net.minecraft.world.level.chunk.LevelChunk;
++import net.minecraft.world.level.chunk.LevelChunkSection;
++import net.minecraft.world.level.chunk.PalettedContainer;
++import net.minecraft.world.level.chunk.PalettedContainerFactory;
++import net.minecraft.world.level.dimension.DimensionType;
++import net.minecraft.world.level.lighting.LevelLightEngine;
++import org.bukkit.World;
++import org.bukkit.support.RegistryHelper;
++import org.bukkit.support.environment.VanillaFeature;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++@VanillaFeature
++class CavePacketTest {
++    private Level level;
++    private LevelChunk chunk;
++    private LevelChunkSection[] sections;
++    private PalettedContainerFactory factory;
++    private ServerPlayer player;
++    private ChunkPacketBlockControllerCave controller;
++    private ClientboundLevelChunkWithLightPacket original;
++    private ClientboundLightUpdatePacketData light;
++
++    @BeforeEach
++    void setup() {
++        this.factory = PalettedContainerFactory.create(RegistryHelper.registryAccess());
++        this.sections = new LevelChunkSection[2];
++        for (int i = 0; i < 2; i++) {
++            this.sections[i] = new LevelChunkSection(new PalettedContainer<>(Blocks.STONE.defaultBlockState(),
++                this.factory.blockStatesStrategy(), null), this.factory.createForBiomes());
++        }
++        for (int y = 20; y < 32; y++) for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++) {
++            this.sections[1].setBlockState(x, y & 15, z, Blocks.AIR.defaultBlockState());
++        }
++        this.sections[0].setBlockState(4, 8, 4, Blocks.CAVE_AIR.defaultBlockState());
++        this.sections[0].setBlockState(5, 8, 4, Blocks.AIR.defaultBlockState());
++        this.sections[0].setBlockState(6, 8, 4, Blocks.DIAMOND_ORE.defaultBlockState());
++        this.level = mock(Level.class);
++        when(this.level.getMinY()).thenReturn(0);
++        when(this.level.getHeight()).thenReturn(32);
++        when(this.level.getMaxY()).thenReturn(31);
++        DimensionType dimension = mock(DimensionType.class);
++        when(dimension.hasSkyLight()).thenReturn(true);
++        when(this.level.dimensionType()).thenReturn(dimension);
++        org.bukkit.craftbukkit.CraftWorld world = mock(org.bukkit.craftbukkit.CraftWorld.class);
++        when(world.getEnvironment()).thenReturn(World.Environment.NORMAL);
++        when(this.level.getWorld()).thenReturn(world);
++        LevelLightEngine engine = mock(LevelLightEngine.class);
++        when(engine.getMinLightSection()).thenReturn(0);
++        when(this.level.getLightEngine()).thenReturn(engine);
++        this.chunk = mock(LevelChunk.class);
++        when(this.chunk.getPos()).thenReturn(new ChunkPos(0, 0));
++        when(this.chunk.getSections()).thenReturn(this.sections);
++        when(this.chunk.getHeightmaps()).thenReturn(List.of());
++        when(this.chunk.getBlockEntities()).thenReturn(Map.of());
++        when(this.level.getChunkIfLoaded(anyInt(), anyInt())).thenReturn(null);
++        when(this.level.getChunkIfLoaded(0, 0)).thenReturn(this.chunk);
++        this.player = mock(ServerPlayer.class);
++        when(this.player.blockPosition()).thenReturn(new BlockPos(1024, 100, 1024));
++        this.controller = new ChunkPacketBlockControllerCave(this.level, 32, false);
++        this.light = light();
++        this.original = mock(ClientboundLevelChunkWithLightPacket.class);
++        when(this.original.getX()).thenReturn(0);
++        when(this.original.getZ()).thenReturn(0);
++        when(this.original.getLightData()).thenReturn(this.light);
++    }
++
++    private static ClientboundLightUpdatePacketData light() {
++        FriendlyByteBuf buffer = new FriendlyByteBuf(Unpooled.buffer());
++        try {
++            BitSet full = new BitSet(); full.set(0, 2);
++            buffer.writeBitSet(full); buffer.writeBitSet(full);
++            buffer.writeBitSet(new BitSet()); buffer.writeBitSet(new BitSet());
++            byte[] data = new byte[2048]; java.util.Arrays.fill(data, (byte)0xFF);
++            for (int layer = 0; layer < 2; layer++) {
++                buffer.writeVarInt(2);
++                buffer.writeByteArray(data); buffer.writeByteArray(data);
++            }
++            return new ClientboundLightUpdatePacketData(buffer, 0, 0);
++        } finally {
++            buffer.release();
++        }
++    }
++
++    private LevelChunkSection readSection(ClientboundLevelChunkWithLightPacket packet, int index) {
++        FriendlyByteBuf buffer = packet.getChunkData().getReadBuffer();
++        try {
++            LevelChunkSection section = null;
++            for (int i = 0; i <= index; i++) {
++                section = new LevelChunkSection(this.factory, null, null, 0);
++                section.read(buffer);
++            }
++            return section;
++        } finally {
++            buffer.release();
++        }
++    }
++
++    @Test
++    void bothKindsOfAirAndOreBecomeSolidWithoutChangingWorldOrBiomes() {
++        CavePlayerState state = new CavePlayerState();
++        ClientboundLevelChunkWithLightPacket packet = (ClientboundLevelChunkWithLightPacket)this.controller.filterPacket(this.player, this.original, state);
++        LevelChunkSection hidden = readSection(packet, 0);
++        assertTrue(packet.isReady());
++        assertFalse(hidden.hasOnlyAir());
++        assertEquals(Blocks.STONE.defaultBlockState(), hidden.getBlockState(4, 8, 4));
++        assertEquals(Blocks.STONE.defaultBlockState(), hidden.getBlockState(5, 8, 4));
++        assertEquals(Blocks.STONE.defaultBlockState(), hidden.getBlockState(6, 8, 4));
++        assertEquals(Blocks.CAVE_AIR.defaultBlockState(), this.sections[0].getBlockState(4, 8, 4));
++        assertEquals(Blocks.DIAMOND_ORE.defaultBlockState(), this.sections[0].getBlockState(6, 8, 4));
++        assertEquals(this.sections[0].getBiomes().get(0, 0, 0), hidden.getBiomes().get(0, 0, 0));
++        assertEquals(Blocks.AIR.defaultBlockState(), readSection(packet, 1).getBlockState(0, 8, 0));
++    }
++
++    @Test
++    void playerViewsAndLightMasksAreIndependent() {
++        CavePlayerState farState = new CavePlayerState();
++        ClientboundLevelChunkWithLightPacket far = (ClientboundLevelChunkWithLightPacket)this.controller.filterPacket(this.player, this.original, farState);
++        ServerPlayer nearPlayer = mock(ServerPlayer.class);
++        when(nearPlayer.blockPosition()).thenReturn(new BlockPos(4, 8, 4));
++        CavePlayerState nearState = new CavePlayerState();
++        ClientboundLevelChunkWithLightPacket near = (ClientboundLevelChunkWithLightPacket)this.controller.filterPacket(nearPlayer, this.original, nearState);
++        assertEquals(Blocks.CAVE_AIR.defaultBlockState(), readSection(near, 0).getBlockState(4, 8, 4));
++        assertEquals(Blocks.STONE.defaultBlockState(), readSection(far, 0).getBlockState(4, 8, 4));
++        int index = (8 << 8) | (4 << 4) | 4;
++        assertEquals(0, (far.getLightData().getSkyUpdates().getFirst()[index >> 1] >> ((index & 1) * 4)) & 15);
++        assertEquals(15, (near.getLightData().getSkyUpdates().getFirst()[index >> 1] >> ((index & 1) * 4)) & 15);
++        assertEquals((byte)0xFF, this.light.getSkyUpdates().getFirst()[index >> 1]);
++    }
++
++    @Test
++    void originallyEmptySectionIsSerializedAsNonEmptySolidTerrain() {
++        this.sections[0] = new LevelChunkSection(this.factory, null, null, 0);
++        ClientboundLevelChunkWithLightPacket packet = (ClientboundLevelChunkWithLightPacket)this.controller.filterPacket(this.player,
++            this.original, new CavePlayerState());
++        FriendlyByteBuf buffer = packet.getChunkData().getReadBuffer();
++        try {
++            assertEquals(4096, buffer.readShort());
++            assertEquals(0, buffer.readShort());
++        } finally {
++            buffer.release();
++        }
++        assertEquals(Blocks.STONE.defaultBlockState(), readSection(packet, 0).getBlockState(0, 0, 0));
++        assertTrue(this.sections[0].hasOnlyAir());
++    }
++
++    @Test
++    void permissionBypassDoesNotContaminateLaterFilteredPackets() {
++        var craftPlayer = mock(org.bukkit.craftbukkit.entity.CraftPlayer.class);
++        when(this.player.getBukkitEntity()).thenReturn(craftPlayer);
++        when(craftPlayer.hasPermission("paper.antixray.bypass")).thenReturn(true);
++        var withPermissions = new ChunkPacketBlockControllerCave(this.level, 32, true);
++        CavePlayerState state = new CavePlayerState();
++        assertSame(this.original, withPermissions.filterPacket(this.player, this.original, state));
++        when(craftPlayer.hasPermission("paper.antixray.bypass")).thenReturn(false);
++        ClientboundLevelChunkWithLightPacket filtered = (ClientboundLevelChunkWithLightPacket)withPermissions.filterPacket(this.player, this.original, state);
++        assertEquals(Blocks.STONE.defaultBlockState(), readSection(filtered, 0).getBlockState(4, 8, 4));
++    }
++
++    @Test
++    void netherRoofAirIsPreservedWhileUndergroundAirIsNetherrack() {
++        when(this.level.getWorld().getEnvironment()).thenReturn(World.Environment.NETHER);
++        when(this.level.dimensionType().hasSkyLight()).thenReturn(false);
++        ClientboundLevelChunkWithLightPacket packet = (ClientboundLevelChunkWithLightPacket)this.controller.filterPacket(this.player,
++            this.original, new CavePlayerState());
++        assertEquals(Blocks.AIR.defaultBlockState(), readSection(packet, 1).getBlockState(0, 8, 0));
++        assertEquals(Blocks.NETHERRACK.defaultBlockState(), readSection(packet, 0).getBlockState(4, 8, 4));
++    }
++
++    @Test
++    void endVoidBelowAnIslandRemainsEmpty() {
++        when(this.level.getWorld().getEnvironment()).thenReturn(World.Environment.THE_END);
++        when(this.level.dimensionType().hasSkyLight()).thenReturn(false);
++        this.sections[0] = new LevelChunkSection(this.factory, null, null, 0);
++        ClientboundLevelChunkWithLightPacket packet = (ClientboundLevelChunkWithLightPacket)this.controller.filterPacket(this.player,
++            this.original, new CavePlayerState());
++        assertEquals(Blocks.AIR.defaultBlockState(), readSection(packet, 0).getBlockState(0, 0, 0));
++        assertTrue(readSection(packet, 0).hasOnlyAir());
++    }
++
++    @Test
++    void singleAndMultiBlockUpdatesUseSentVisibilityAndUnloadForgetsIt() {
++        CavePlayerState state = new CavePlayerState();
++        this.controller.filterPacket(this.player, this.original, state);
++        BlockPos hidden = new BlockPos(4, 8, 4);
++        ClientboundBlockUpdatePacket update = new ClientboundBlockUpdatePacket(hidden, Blocks.CAVE_AIR.defaultBlockState());
++        ClientboundBlockUpdatePacket filtered = (ClientboundBlockUpdatePacket)this.controller.filterPacket(this.player, update, state);
++        assertEquals(Blocks.STONE.defaultBlockState(), filtered.getBlockState());
++        it.unimi.dsi.fastutil.shorts.Short2ObjectLinkedOpenHashMap<net.minecraft.world.level.block.state.BlockState> changes = new it.unimi.dsi.fastutil.shorts.Short2ObjectLinkedOpenHashMap<>();
++        changes.put(SectionPos.sectionRelativePos(hidden), Blocks.AIR.defaultBlockState());
++        ClientboundSectionBlocksUpdatePacket multi = new ClientboundSectionBlocksUpdatePacket(SectionPos.of(hidden), changes);
++        ClientboundSectionBlocksUpdatePacket masked = (ClientboundSectionBlocksUpdatePacket)this.controller.filterPacket(this.player, multi, state);
++        masked.runUpdates((pos, block) -> assertEquals(Blocks.STONE.defaultBlockState(), block));
++        assertNull(this.controller.filterPacket(this.player, new ClientboundBlockEventPacket(hidden, Blocks.CHEST, 1, 1), state));
++        this.controller.filterPacket(this.player, new ClientboundForgetLevelChunkPacket(new ChunkPos(0, 0)), state);
++        assertTrue(state.sent.isEmpty());
++        assertTrue(state.nearby.isEmpty());
++    }
++
++    @Test
++    void hiddenBlockEntitiesAndBundledUpdatesDoNotLeak() {
++        BlockPos hidden = new BlockPos(7, 8, 4);
++        BlockPos exposed = new BlockPos(2, 24, 2);
++        net.minecraft.world.level.block.entity.BlockEntity hiddenEntity = entity(hidden);
++        net.minecraft.world.level.block.entity.BlockEntity visibleEntity = entity(exposed);
++        when(this.chunk.getBlockEntities()).thenReturn(Map.of(hidden, hiddenEntity, exposed, visibleEntity));
++        when(this.level.registryAccess()).thenReturn(RegistryHelper.registryAccess());
++        CavePlayerState state = new CavePlayerState();
++        ClientboundLevelChunkWithLightPacket packet = (ClientboundLevelChunkWithLightPacket)this.controller.filterPacket(this.player, this.original, state);
++        java.util.List<BlockPos> positions = new java.util.ArrayList<>();
++        packet.getChunkData().getBlockEntitiesTagsConsumer(0, 0).accept((pos, type, tag) -> positions.add(pos.immutable()));
++        assertEquals(List.of(exposed), positions);
++        ClientboundBlockEntityDataPacket entityUpdate = new ClientboundBlockEntityDataPacket(hidden,
++            net.minecraft.world.level.block.entity.BlockEntityTypes.CHEST, new net.minecraft.nbt.CompoundTag());
++        ClientboundBundlePacket bundle = new ClientboundBundlePacket(List.of(entityUpdate,
++            new ClientboundBlockUpdatePacket(hidden, Blocks.AIR.defaultBlockState())));
++        ClientboundBundlePacket masked = (ClientboundBundlePacket)this.controller.filterPacket(this.player, bundle, state);
++        java.util.List<net.minecraft.network.protocol.Packet<?>> children = new java.util.ArrayList<>();
++        masked.subPackets().forEach(children::add);
++        assertEquals(1, children.size());
++        assertEquals(Blocks.STONE.defaultBlockState(), ((ClientboundBlockUpdatePacket)children.getFirst()).getBlockState());
++    }
++
++    private net.minecraft.world.level.block.entity.BlockEntity entity(BlockPos pos) {
++        net.minecraft.world.level.block.entity.BlockEntity entity = mock(net.minecraft.world.level.block.entity.BlockEntity.class);
++        when(entity.getBlockPos()).thenReturn(pos);
++        when(entity.getLevel()).thenReturn(this.level);
++        doReturn(net.minecraft.world.level.block.entity.BlockEntityTypes.CHEST).when(entity).getType();
++        when(entity.getUpdateTag(any())).thenReturn(new net.minecraft.nbt.CompoundTag());
++        return entity;
++    }
++
++    @Test
++    void terrainChangesInvalidateMasksAndRevealedCellsStayRevealed() {
++        CavePlayerState state = new CavePlayerState();
++        when(this.player.blockPosition()).thenReturn(new BlockPos(4, 8, 4));
++        this.controller.filterPacket(this.player, this.original, state);
++        when(this.player.blockPosition()).thenReturn(new BlockPos(1024, 100, 1024));
++        this.sections[0].setBlockState(4, 8, 4, Blocks.WATER.defaultBlockState());
++        this.controller.onBlockChange(this.level, new BlockPos(4, 8, 4), Blocks.WATER.defaultBlockState(),
++            Blocks.CAVE_AIR.defaultBlockState(), 0, 0);
++        ClientboundLevelChunkWithLightPacket refreshed = (ClientboundLevelChunkWithLightPacket)this.controller.filterPacket(this.player, this.original, state);
++        assertEquals(Blocks.WATER.defaultBlockState(), readSection(refreshed, 0).getBlockState(4, 8, 4));
++        this.controller.filterPacket(this.player, new ClientboundForgetLevelChunkPacket(new ChunkPos(0, 0)), state);
++        ClientboundLevelChunkWithLightPacket reloaded = (ClientboundLevelChunkWithLightPacket)this.controller.filterPacket(this.player, this.original, state);
++        assertEquals(Blocks.STONE.defaultBlockState(), readSection(reloaded, 0).getBlockState(4, 8, 4));
++    }
++
++    @Test
++    void refreshQueueIsLimitedToTwoChunksPerPlayerTick() throws ReflectiveOperationException {
++        CavePlayerState state = new CavePlayerState();
++        state.reset(this.controller);
++        net.minecraft.server.network.ServerGamePacketListenerImpl connection = mock(net.minecraft.server.network.ServerGamePacketListenerImpl.class);
++        java.lang.reflect.Field connectionState = net.minecraft.server.network.ServerGamePacketListenerImpl.class.getField("caveVisibility");
++        connectionState.setAccessible(true);
++        connectionState.set(connection, state);
++        this.player.connection = connection;
++        when(this.player.getDeltaMovement()).thenReturn(net.minecraft.world.phys.Vec3.ZERO);
++        java.lang.reflect.Field blockController = Level.class.getField("chunkPacketBlockController");
++        blockController.setAccessible(true);
++        blockController.set(this.level, this.controller);
++        when(this.chunk.getLevel()).thenReturn(this.level);
++        var loader = mock(ca.spottedleaf.moonrise.patches.chunk_system.player.RegionizedPlayerChunkLoader.PlayerChunkLoaderData.class);
++        when(this.player.moonrise$getChunkLoader()).thenReturn(loader);
++        var sent = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
++        for (int x = 0; x < 3; x++) {
++            LevelChunk next = mock(LevelChunk.class);
++            when(next.getLevel()).thenReturn(this.level);
++            when(next.getPos()).thenReturn(new ChunkPos(x, 0));
++            when(next.getSections()).thenReturn(this.sections);
++            when(next.getHeightmaps()).thenReturn(List.of());
++            when(next.getBlockEntities()).thenReturn(Map.of());
++            when(this.level.getChunkIfLoaded(x, 0)).thenReturn(next);
++            long key = ChunkPos.pack(x, 0);
++            sent.add(key);
++            state.queue(key);
++        }
++        when(loader.getSentChunksRaw()).thenReturn(sent);
++        java.util.List<ClientboundLevelChunkWithLightPacket> delivered = new java.util.ArrayList<>();
++        doAnswer(invocation -> {
++            delivered.add((ClientboundLevelChunkWithLightPacket)this.controller.filterPacket(this.player, invocation.getArgument(0), state));
++            return null;
++        }).when(connection).send(any(net.minecraft.network.protocol.Packet.class));
++        this.controller.tickPlayer(this.player);
++        assertEquals(2, delivered.size());
++        assertEquals(1, state.pending.size());
++        this.controller.tickPlayer(this.player);
++        assertEquals(3, delivered.size());
++        assertTrue(state.pending.isEmpty());
++    }
++
++    private java.util.List<net.minecraft.network.protocol.Packet<?>> connectForTicks(CavePlayerState state) throws ReflectiveOperationException {
++        var connection = mock(net.minecraft.server.network.ServerGamePacketListenerImpl.class);
++        java.lang.reflect.Field field = net.minecraft.server.network.ServerGamePacketListenerImpl.class.getField("caveVisibility");
++        field.setAccessible(true); field.set(connection, state);
++        this.player.connection = connection;
++        when(this.player.getDeltaMovement()).thenReturn(net.minecraft.world.phys.Vec3.ZERO);
++        field = Level.class.getField("chunkPacketBlockController");
++        field.setAccessible(true); field.set(this.level, this.controller);
++        when(this.chunk.getLevel()).thenReturn(this.level);
++        var loader = mock(ca.spottedleaf.moonrise.patches.chunk_system.player.RegionizedPlayerChunkLoader.PlayerChunkLoaderData.class);
++        when(this.player.moonrise$getChunkLoader()).thenReturn(loader);
++        when(loader.getSentChunksRaw()).thenReturn(new it.unimi.dsi.fastutil.longs.LongOpenHashSet(new long[]{0L}));
++        java.util.List<net.minecraft.network.protocol.Packet<?>> delivered = new java.util.ArrayList<>();
++        doAnswer(invocation -> {
++            var filtered = this.controller.filterPacket(this.player, invocation.getArgument(0), state);
++            if (filtered != null) delivered.add(filtered);
++            return null;
++        }).when(connection).send(any(net.minecraft.network.protocol.Packet.class));
++        return delivered;
++    }
++
++    @Test
++    void coldCachesDoNotTriggerAnIdleRefreshLoop() throws ReflectiveOperationException {
++        CavePlayerState state = new CavePlayerState();
++        this.controller.filterPacket(this.player, this.original, state);
++        var delivered = connectForTicks(state);
++        for (int tick = 0; tick < 100; tick++) this.controller.tickPlayer(this.player);
++        assertTrue(delivered.isEmpty(), "Cache fills must not manufacture terrain changes");
++        assertTrue(state.pending.isEmpty());
++    }
++
++    @Test
++    void movementRevealsBlocksWithoutResendingFullChunks() throws ReflectiveOperationException {
++        CavePlayerState state = new CavePlayerState();
++        this.controller.filterPacket(this.player, this.original, state);
++        var delivered = connectForTicks(state);
++        when(this.player.blockPosition()).thenReturn(new BlockPos(4, 8, 4));
++        this.controller.tickPlayer(this.player);
++        assertTrue(delivered.stream().anyMatch(ClientboundSectionBlocksUpdatePacket.class::isInstance));
++        assertTrue(delivered.stream().anyMatch(ClientboundLightUpdatePacket.class::isInstance));
++        assertFalse(delivered.stream().anyMatch(ClientboundLevelChunkWithLightPacket.class::isInstance));
++        java.util.Map<BlockPos, net.minecraft.world.level.block.state.BlockState> changes = new java.util.HashMap<>();
++        delivered.stream().filter(ClientboundSectionBlocksUpdatePacket.class::isInstance)
++            .map(ClientboundSectionBlocksUpdatePacket.class::cast)
++            .forEach(packet -> packet.runUpdates((pos, block) -> changes.put(pos.immutable(), block)));
++        assertEquals(Blocks.CAVE_AIR.defaultBlockState(), changes.get(new BlockPos(4, 8, 4)));
++        assertEquals(Blocks.DIAMOND_ORE.defaultBlockState(), changes.get(new BlockPos(6, 8, 4)));
++        int count = delivered.size();
++        for (int tick = 0; tick < 100; tick++) this.controller.tickPlayer(this.player);
++        assertEquals(count, delivered.size(), "Standing still must not repeatedly resend the same cells");
++    }
++
++    @Test
++    void evictingTopologyCachesDoesNotQueueUnchangedChunks() throws ReflectiveOperationException {
++        CavePlayerState state = new CavePlayerState();
++        var delivered = connectForTicks(state);
++        // Exceed all three 256-entry caches, as flying through a world does.
++        for (int x = 0; x < 270; x++) {
++            LevelChunk next = mock(LevelChunk.class);
++            when(next.getPos()).thenReturn(new ChunkPos(x, 0));
++            when(next.getSections()).thenReturn(this.sections);
++            when(next.getHeightmaps()).thenReturn(List.of());
++            when(next.getBlockEntities()).thenReturn(Map.of());
++            when(this.level.getChunkIfLoaded(x, 0)).thenReturn(next);
++            ClientboundLevelChunkWithLightPacket packet = mock(ClientboundLevelChunkWithLightPacket.class);
++            when(packet.getX()).thenReturn(x);
++            when(packet.getZ()).thenReturn(0);
++            when(packet.getLightData()).thenReturn(this.light);
++            this.controller.filterPacket(this.player, packet, state);
++        }
++        for (int tick = 0; tick < 100; tick++) this.controller.tickPlayer(this.player);
++        assertTrue(state.pending.isEmpty(), "Cache eviction must not be treated as an edit to world terrain");
++        assertTrue(delivered.isEmpty());
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/antixray/CaveVisibilityTest.java b/src/test/java/io/papermc/paper/antixray/CaveVisibilityTest.java
+new file mode 100644
+index 000000000..7f12b384f
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/antixray/CaveVisibilityTest.java
+@@ -0,0 +1,126 @@
++package io.papermc.paper.antixray;
++
++import java.util.BitSet;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++class CaveVisibilityTest {
++    @Test
++    void boundedBitQueriesHandleWordEdgesAndIgnoreFarAwayBits() {
++        BitSet bits = new BitSet();
++        java.util.Random random = new java.util.Random(417);
++        for (int i = 0; i < 512; i++) if (random.nextInt(5) == 0) bits.set(i);
++        bits.set(63); bits.set(64); bits.set(1_000_000);
++        long[] words = bits.toLongArray();
++        for (int start = 0; start < 1024; start++) {
++            for (int length = 1; length <= 4; length++) {
++                assertEquals(!bits.get(start, start + length).isEmpty(), CaveVisibility.anySet(words, start, start + length));
++            }
++        }
++        assertFalse(CaveVisibility.anySet(words, 900_000, 900_004));
++    }
++
++    @Test
++    void directChunkProjectionMatchesVoxelReferenceAcrossNegativeBoundaries() {
++        int width = 48, height = 384, depth = 48;
++        int baseX = -32, baseY = -64, baseZ = -48;
++        BitSet voxels = new BitSet();
++        BitSet expected = new BitSet();
++        java.util.Random random = new java.util.Random(928);
++        for (int i = 0; i < 2000; i++) voxels.set(random.nextInt(width * height * depth));
++        for (int index = voxels.nextSetBit(0); index >= 0; index = voxels.nextSetBit(index + 1)) {
++            int x = baseX + index % width;
++            int y = baseY + index / (width * depth);
++            int z = baseZ + (index / width) % depth;
++            for (int[] offset : new int[][]{{0,0,0},{-4,0,0},{4,0,0},{0,-4,0},{0,4,0},{0,0,-4},{0,0,4}}) {
++                int bx = x + offset[0], by = y + offset[1], bz = z + offset[2];
++                if (bx >= -16 && bx < 0 && bz >= -32 && bz < -16 && by >= -64 && by < 320) {
++                    expected.set(CaveVisibility.cellIndex(bx, by, bz, -64));
++                }
++            }
++        }
++        assertEquals(expected, CaveVisibility.projectToChunk(voxels, baseX, baseY, baseZ, width, height, depth, -64, 320, -16, -32));
++    }
++
++    @Test
++    void exteriorStopsInsideTheEntranceAndDoesNotRevealSealedAir() {
++        BitSet open = new BitSet();
++        open.set(0, 21); open.set(30, 41);
++        BitSet sky = new BitSet(); sky.set(0, 4);
++        BitSet visible = CaveVisibility.exterior(open, sky, 48, 1, 1, 12);
++        assertEquals(16, visible.cardinality());
++        assertTrue(visible.get(15));
++        assertFalse(visible.get(16));
++        assertFalse(visible.get(30));
++    }
++
++    @Test
++    void sealedWallSeparatesCavities() {
++        BitSet open = new BitSet();
++        open.set(0, 9 * 3 * 3);
++        for (int y = 0; y < 3; y++) for (int z = 0; z < 3; z++) open.clear((y * 3 + z) * 9 + 4);
++        BitSet seeds = new BitSet();
++        seeds.set((1 * 3 + 1) * 9 + 1);
++        BitSet visible = CaveVisibility.flood(open, seeds, 9, 3, 3, 32, 81);
++        assertEquals(36, visible.cardinality());
++        assertFalse(visible.get((1 * 3 + 1) * 9 + 5));
++    }
++
++    @Test
++    void tunnelCrossesChunkBoundaryButStopsAtDistanceLimit() {
++        BitSet open = new BitSet();
++        open.set(0, 48);
++        BitSet seed = new BitSet();
++        seed.set(14);
++        BitSet visible = CaveVisibility.flood(open, seed, 48, 1, 1, 12, 48);
++        assertTrue(visible.get(16));
++        assertTrue(visible.get(26));
++        assertFalse(visible.get(27));
++        assertFalse(visible.get(1));
++    }
++
++    @Test
++    void rowsAndLayersDoNotWrapAtVolumeEdges() {
++        BitSet open = new BitSet();
++        open.set(2); // x=2,z=0,y=0
++        open.set(3); // x=0,z=1,y=0; not adjacent
++        open.set(9); // x=0,z=0,y=1; also not adjacent
++        BitSet seeds = new BitSet();
++        seeds.set(2);
++        assertEquals(seeds, CaveVisibility.flood(open, seeds, 3, 2, 3, 12, 18));
++    }
++
++    @Test
++    void visitsStayWithinBudgetAndInputsStayImmutable() {
++        BitSet open = new BitSet();
++        open.set(0, 4096);
++        BitSet seeds = new BitSet();
++        seeds.set(2048);
++        BitSet before = (BitSet)open.clone();
++        BitSet result = CaveVisibility.flood(open, seeds, 16, 16, 16, 24, 100);
++        assertEquals(100, result.cardinality());
++        assertEquals(before, open);
++        assertEquals(1, seeds.cardinality());
++    }
++
++    @Test
++    void sealedAndMissingNeighborBlocksDoNotBecomeReachable() {
++        BitSet open = new BitSet();
++        open.set(0, 16);
++        open.set(32, 48); // Unavailable middle chunk is closed.
++        BitSet seed = new BitSet();
++        seed.set(15);
++        BitSet visible = CaveVisibility.flood(open, seed, 48, 1, 1, 48, 48);
++        assertEquals(16, visible.cardinality());
++        assertFalse(visible.get(32));
++    }
++
++    @Test
++    void negativeCoordinatesAndSectionBoundariesUseTheSameCellMask() {
++        BitSet cells = new BitSet();
++        cells.set(CaveVisibility.cellIndex(-1, -1, -1, -64));
++        assertTrue(CaveVisibility.visible(cells, 15, -4, 15, -64, 320));
++        assertFalse(CaveVisibility.visible(cells, 15, 0, 15, -64, 320));
++        assertTrue(CaveVisibility.visible(cells, 0, 320, 0, -64, 320));
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/antixray/CaveVisibilityTestSuite.java b/src/test/java/io/papermc/paper/antixray/CaveVisibilityTestSuite.java
+new file mode 100644
+index 000000000..8c9da758c
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/antixray/CaveVisibilityTestSuite.java
+@@ -0,0 +1,9 @@
++package io.papermc.paper.antixray;
++
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++
++@Suite
++@SelectClasses({CaveVisibilityTest.class, CavePacketTest.class, CaveEffectsTest.class})
++public class CaveVisibilityTestSuite {
++}

@@ -5,6 +5,9 @@
 build
 
 /run
+/libraries/
+/versions/
+/config/2b2tfolia-seed.key
 
 /folia-server/build.gradle.kts
 /folia-server/src/minecraft

@@ -1,0 +1,171 @@
+diff --git a/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockControllerAntiXray.java b/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockControllerAntiXray.java
+index 57e091df0..2dbddd808 100644
+--- a/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockControllerAntiXray.java
++++ b/src/main/java/io/papermc/paper/antixray/ChunkPacketBlockControllerAntiXray.java
+@@ -19,6 +19,7 @@ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.server.level.ServerPlayer;
+ import net.minecraft.server.level.ServerPlayerGameMode;
++import net.minecraft.tags.BlockTags;
+ import net.minecraft.world.level.ChunkPos;
+ import net.minecraft.world.level.Level;
+ import net.minecraft.world.level.biome.Biomes;
+@@ -38,6 +39,7 @@ import org.bukkit.Bukkit;
+ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockController {
+ 
+     private static final Palette<BlockState> GLOBAL_BLOCKSTATE_PALETTE = new GlobalPalette<>(Block.BLOCK_STATE_REGISTRY);
++    private static final BlockState[] PRESET_AIR = {Blocks.AIR.defaultBlockState()};
+     private static final LevelChunkSection EMPTY_SECTION = null;
+     private final Executor executor;
+     private final EngineMode engineMode;
+@@ -55,6 +57,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+     private final int[] presetBlockStateBitsDeepslateGlobal;
+     private final int[] presetBlockStateBitsNetherrackGlobal;
+     private final int[] presetBlockStateBitsEndStoneGlobal;
++    private final int[] presetBlockStateBitsAirGlobal;
+     private final boolean[] solidGlobal = new boolean[Block.BLOCK_STATE_REGISTRY.size()];
+     private final boolean[] obfuscateGlobal = new boolean[Block.BLOCK_STATE_REGISTRY.size()];
+     private final LevelChunkSection[] emptyNearbyChunkSections = {EMPTY_SECTION, EMPTY_SECTION, EMPTY_SECTION, EMPTY_SECTION};
+@@ -69,19 +72,35 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+         usePermission = paperWorldConfig.usePermission;
+         List<Block> toObfuscate;
+ 
+-        if (engineMode == EngineMode.HIDE) {
+-            toObfuscate = paperWorldConfig.hiddenBlocks;
++        if (isHideMode()) {
++            toObfuscate = engineMode == EngineMode.HIDE_AS_AIR ? List.of() : paperWorldConfig.hiddenBlocks;
+             presetBlockStates = null;
+             presetBlockStatesFull = null;
+-            presetBlockStatesStone = new BlockState[]{Blocks.STONE.defaultBlockState()};
+-            presetBlockStatesDeepslate = new BlockState[]{Blocks.DEEPSLATE.defaultBlockState()};
+-            presetBlockStatesNetherrack = new BlockState[]{Blocks.NETHERRACK.defaultBlockState()};
+-            presetBlockStatesEndStone = new BlockState[]{Blocks.END_STONE.defaultBlockState()};
+             presetBlockStateBitsGlobal = null;
+-            presetBlockStateBitsStoneGlobal = new int[]{GLOBAL_BLOCKSTATE_PALETTE.idFor(Blocks.STONE.defaultBlockState(), PaletteResize.noResizeExpected())};
+-            presetBlockStateBitsDeepslateGlobal = new int[]{GLOBAL_BLOCKSTATE_PALETTE.idFor(Blocks.DEEPSLATE.defaultBlockState(), PaletteResize.noResizeExpected())};
+-            presetBlockStateBitsNetherrackGlobal = new int[]{GLOBAL_BLOCKSTATE_PALETTE.idFor(Blocks.NETHERRACK.defaultBlockState(), PaletteResize.noResizeExpected())};
+-            presetBlockStateBitsEndStoneGlobal = new int[]{GLOBAL_BLOCKSTATE_PALETTE.idFor(Blocks.END_STONE.defaultBlockState(), PaletteResize.noResizeExpected())};
++
++            if (engineMode == EngineMode.HIDE_AS_AIR) {
++                // Engine-mode 4 deliberately removes occluded blocks from the client chunk view.
++                // Exposed blocks are kept by the existing occlusion pass.
++                presetBlockStatesStone = PRESET_AIR;
++                presetBlockStatesDeepslate = PRESET_AIR;
++                presetBlockStatesNetherrack = PRESET_AIR;
++                presetBlockStatesEndStone = PRESET_AIR;
++                presetBlockStateBitsStoneGlobal = null;
++                presetBlockStateBitsDeepslateGlobal = null;
++                presetBlockStateBitsNetherrackGlobal = null;
++                presetBlockStateBitsEndStoneGlobal = null;
++                presetBlockStateBitsAirGlobal = new int[]{GLOBAL_BLOCKSTATE_PALETTE.idFor(Blocks.AIR.defaultBlockState(), PaletteResize.noResizeExpected())};
++            } else {
++                presetBlockStatesStone = new BlockState[]{Blocks.STONE.defaultBlockState()};
++                presetBlockStatesDeepslate = new BlockState[]{Blocks.DEEPSLATE.defaultBlockState()};
++                presetBlockStatesNetherrack = new BlockState[]{Blocks.NETHERRACK.defaultBlockState()};
++                presetBlockStatesEndStone = new BlockState[]{Blocks.END_STONE.defaultBlockState()};
++                presetBlockStateBitsStoneGlobal = new int[]{GLOBAL_BLOCKSTATE_PALETTE.idFor(Blocks.STONE.defaultBlockState(), PaletteResize.noResizeExpected())};
++                presetBlockStateBitsDeepslateGlobal = new int[]{GLOBAL_BLOCKSTATE_PALETTE.idFor(Blocks.DEEPSLATE.defaultBlockState(), PaletteResize.noResizeExpected())};
++                presetBlockStateBitsNetherrackGlobal = new int[]{GLOBAL_BLOCKSTATE_PALETTE.idFor(Blocks.NETHERRACK.defaultBlockState(), PaletteResize.noResizeExpected())};
++                presetBlockStateBitsEndStoneGlobal = new int[]{GLOBAL_BLOCKSTATE_PALETTE.idFor(Blocks.END_STONE.defaultBlockState(), PaletteResize.noResizeExpected())};
++                presetBlockStateBitsAirGlobal = null;
++            }
+         } else {
+             toObfuscate = new ArrayList<>(paperWorldConfig.replacementBlocks);
+             List<BlockState> presetBlockStateList = new LinkedList<>();
+@@ -114,6 +133,7 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+             presetBlockStateBitsDeepslateGlobal = null;
+             presetBlockStateBitsNetherrackGlobal = null;
+             presetBlockStateBitsEndStoneGlobal = null;
++            presetBlockStateBitsAirGlobal = null;
+         }
+ 
+         for (Block block : toObfuscate) {
+@@ -141,11 +161,25 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+             }
+         }
+ 
++        if (engineMode == EngineMode.HIDE_AS_AIR) {
++            // Engine-mode 4 considers opaque blocks as candidates. The existing
++            // occlusion pass preserves exposed faces without height or light heuristics.
++            for (int i = 0; i < obfuscateGlobal.length; i++) {
++                BlockState blockState = GLOBAL_BLOCKSTATE_PALETTE.valueFor(i);
++                obfuscateGlobal[i] = blockState != null && !blockState.isAir() && solidGlobal[i]
++                    && !blockState.is(BlockTags.LOGS) && !blockState.is(BlockTags.LEAVES);
++            }
++        }
++
+         maxBlockHeightUpdatePosition = maxBlockHeight + updateRadius - 1;
+     }
+ 
+     private int getPresetBlockStatesFullLength() {
+-        return engineMode == EngineMode.HIDE ? 1 : presetBlockStatesFull.length;
++        return isHideMode() ? 1 : presetBlockStatesFull.length;
++    }
++
++    private boolean isHideMode() {
++        return engineMode == EngineMode.HIDE || engineMode == EngineMode.HIDE_AS_AIR;
+     }
+ 
+     @Override
+@@ -154,7 +188,11 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+         int bottomBlockY = chunkSectionY << 4;
+ 
+         if (bottomBlockY < maxBlockHeight) {
+-            if (engineMode == EngineMode.HIDE) {
++            if (isHideMode()) {
++                if (engineMode == EngineMode.HIDE_AS_AIR) {
++                    return PRESET_AIR;
++                }
++
+                 return switch (level.getWorld().getEnvironment()) {
+                     case NETHER -> presetBlockStatesNetherrack;
+                     case THE_END -> presetBlockStatesEndStone;
+@@ -170,7 +208,11 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+ 
+     @Override
+     public boolean shouldModify(ServerPlayer player, LevelChunk chunk) {
+-        return !usePermission || !player.getBukkitEntity().hasPermission("paper.antixray.bypass");
++        if (usePermission && player.getBukkitEntity().hasPermission("paper.antixray.bypass")) {
++            return false;
++        }
++
++        return true;
+     }
+ 
+     @Override
+@@ -277,12 +319,16 @@ public final class ChunkPacketBlockControllerAntiXray extends ChunkPacketBlockCo
+                 int[] presetBlockStateBitsTemp;
+ 
+                 if (chunkPacketInfoAntiXray.getPalette(chunkSectionIndex) instanceof GlobalPalette) {
+-                    if (engineMode == EngineMode.HIDE) {
+-                        presetBlockStateBitsTemp = switch (level.getWorld().getEnvironment()) {
+-                            case NETHER -> presetBlockStateBitsNetherrackGlobal;
+-                            case THE_END -> presetBlockStateBitsEndStoneGlobal;
+-                            default -> chunkSectionIndex + chunk.getMinSectionY() < 0 ? presetBlockStateBitsDeepslateGlobal : presetBlockStateBitsStoneGlobal;
+-                        };
++                    if (isHideMode()) {
++                        if (engineMode == EngineMode.HIDE_AS_AIR) {
++                            presetBlockStateBitsTemp = presetBlockStateBitsAirGlobal;
++                        } else {
++                            presetBlockStateBitsTemp = switch (level.getWorld().getEnvironment()) {
++                                case NETHER -> presetBlockStateBitsNetherrackGlobal;
++                                case THE_END -> presetBlockStateBitsEndStoneGlobal;
++                                default -> chunkSectionIndex + chunk.getMinSectionY() < 0 ? presetBlockStateBitsDeepslateGlobal : presetBlockStateBitsStoneGlobal;
++                            };
++                        }
+                     } else {
+                         presetBlockStateBitsTemp = presetBlockStateBitsGlobal;
+                     }
+diff --git a/src/main/java/io/papermc/paper/configuration/type/EngineMode.java b/src/main/java/io/papermc/paper/configuration/type/EngineMode.java
+index 7f8b68576..1384615a0 100644
+--- a/src/main/java/io/papermc/paper/configuration/type/EngineMode.java
++++ b/src/main/java/io/papermc/paper/configuration/type/EngineMode.java
+@@ -5,7 +5,7 @@ import org.spongepowered.configurate.serialize.ScalarSerializer;
+ 
+ public enum EngineMode {
+ 
+-    HIDE(1, "hide ores"), OBFUSCATE(2, "obfuscate"), OBFUSCATE_LAYER(3, "obfuscate layer");
++    HIDE(1, "hide ores"), OBFUSCATE(2, "obfuscate"), OBFUSCATE_LAYER(3, "obfuscate layer"), HIDE_AS_AIR(4, "hide occluded blocks as air");
+ 
+     public static final ScalarSerializer<EngineMode> SERIALIZER = new EngineModeSerializer();
+ 

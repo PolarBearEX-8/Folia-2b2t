@@ -1,5 +1,11 @@
 # Folia 2b2t 26.2
 
+## SeedShield Structure Placement Protection
+
+This release adds keyed structure-placement salts for random-spread structures and concentric-ring structures such as Strongholds. The key is generated at `config/2b2tfolia-seed.key`; back it up securely and keep it private. See [`docs/seed-protection.md`](docs/seed-protection.md) before deploying this on an existing world.
+
+The feature affects chunks generated after it is enabled. It does not change terrain generation or relocate structures already saved in existing chunks. It is enabled by default and can be disabled with `seed-protection.enabled: false` in `config/2b2tfolia.yml`.
+
 ## Ender Pearl Stasis
 
 This release adds an idempotent Ender Pearl ticket reapply after a pearl returns to the loaded state. It also loads `config/2b2tfolia.yml` automatically during server startup.

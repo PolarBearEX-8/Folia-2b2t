@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Folia 2b2t Contributors <noreply@folia2b2t.dev>
+Date: Fri, 30 Oct 2026 00:00:00 +0700
+Subject: [PATCH] Add SeedShield structure placement protection
+
+Derive structure placement salts and stronghold ring seeds from a private server key.
+
+diff --git a/net/minecraft/world/level/chunk/ChunkGeneratorStructureState.java b/net/minecraft/world/level/chunk/ChunkGeneratorStructureState.java
+--- a/net/minecraft/world/level/chunk/ChunkGeneratorStructureState.java
++++ b/net/minecraft/world/level/chunk/ChunkGeneratorStructureState.java
+@@ -60,10 +60,16 @@
+     }
+     // Paper start - Add missing structure set seed configs; horrible hack because spigot creates a ton of direct Holders which lose track of the identifying key
+     public static final class KeyedRandomSpreadStructurePlacement extends net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement {
+-        public final net.minecraft.resources.ResourceKey<StructureSet> key;
+-        public KeyedRandomSpreadStructurePlacement(net.minecraft.resources.ResourceKey<StructureSet> key, net.minecraft.core.Vec3i locateOffset, FrequencyReductionMethod frequencyReductionMethod, float frequency, int salt, java.util.Optional<StructurePlacement.ExclusionZone> exclusionZone, int spacing, int separation, net.minecraft.world.level.levelgen.structure.placement.RandomSpreadType spreadType) {
++        public final net.minecraft.resources.@Nullable ResourceKey<StructureSet> key;
++        public final String seedShieldKey;
++        public KeyedRandomSpreadStructurePlacement(net.minecraft.resources.@Nullable ResourceKey<StructureSet> key, String seedShieldKey, net.minecraft.core.Vec3i locateOffset, FrequencyReductionMethod frequencyReductionMethod, float frequency, int salt, java.util.Optional<StructurePlacement.ExclusionZone> exclusionZone, int spacing, int separation, net.minecraft.world.level.levelgen.structure.placement.RandomSpreadType spreadType) {
+             super(locateOffset, frequencyReductionMethod, frequency, salt, exclusionZone, spacing, separation, spreadType);
+             this.key = key;
++            this.seedShieldKey = seedShieldKey;
++        }
++
++        public int seedShieldSalt(final long worldSeed) {
++            return io.papermc.paper.configuration.Folia2b2tConfiguration.protectedStructureSalt(worldSeed, this.seedShieldKey, this.salt);
+         }
+     }
+     // Paper end - Add missing structure set seed configs
+@@ -73,10 +79,19 @@
+         return list.stream().map((holder) -> {
+             StructureSet structureset = holder.value();
+             final Holder<StructureSet> newHolder; // Paper - Add missing structure set seed configs
+-            if (structureset.placement() instanceof net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement randomConfig && holder.unwrapKey().orElseThrow().identifier().getNamespace().equals(net.minecraft.resources.Identifier.DEFAULT_NAMESPACE)) { // Paper - Add missing structure set seed configs; check namespace cause datapacks could add structure sets with the same path
+-                String name = holder.unwrapKey().orElseThrow().identifier().getPath();
++            if (structureset.placement() instanceof net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement randomConfig) { // Paper - Add missing structure set seed configs
++                net.minecraft.resources.ResourceKey<StructureSet> structureSetKey = holder.unwrapKey().orElse(null);
++                String seedShieldKey = structureSetKey != null
++                    ? structureSetKey.identifier().toString()
++                    : "unkeyed:" + structureset.structures().stream()
++                        .map(entry -> entry.structure().unwrapKey().map(key -> key.identifier().toString()).orElse(entry.structure().value().getClass().getName()))
++                        .sorted()
++                        .collect(java.util.stream.Collectors.joining(","))
++                        + ":" + randomConfig.spacing() + ":" + randomConfig.separation() + ":" + randomConfig.salt;
++                String name = structureSetKey == null ? "" : structureSetKey.identifier().getPath();
+                 int seed = randomConfig.salt;
+ 
++                if (structureSetKey != null && structureSetKey.identifier().getNamespace().equals(net.minecraft.resources.Identifier.DEFAULT_NAMESPACE)) { // Preserve Spigot's built-in structure seed settings
+                 switch (name) {
+                     case "desert_pyramids":
+                         seed = conf.desertSeed;
+@@ -132,9 +147,10 @@
+                         break;
+                     // Paper end - Add missing structure set seed configs
+                 }
++                }
+ 
+             // Paper start - Add missing structure set seed configs
+-                structureset = new StructureSet(structureset.structures(), new KeyedRandomSpreadStructurePlacement(holder.unwrapKey().orElseThrow(), randomConfig.locateOffset, randomConfig.frequencyReductionMethod, randomConfig.frequency, seed, randomConfig.exclusionZone, randomConfig.spacing(), randomConfig.separation(), randomConfig.spreadType()));
++                structureset = new StructureSet(structureset.structures(), new KeyedRandomSpreadStructurePlacement(structureSetKey, seedShieldKey, randomConfig.locateOffset, randomConfig.frequencyReductionMethod, randomConfig.frequency, seed, randomConfig.exclusionZone, randomConfig.spacing(), randomConfig.separation(), randomConfig.spreadType()));
+                 newHolder = Holder.direct(structureset); // I really wish we didn't have to do this here
+             } else {
+                 newHolder = holder;
+@@ -204,13 +220,15 @@
+         int spread = placement.spread();
+         HolderSet<Biome> preferredBiomes = placement.preferredBiomes();
+         RandomSource random = RandomSource.create();
++        long ringSeed = this.concentricRingsSeed;
+         // Paper start - Add missing structure set seed configs
+         if (this.conf.strongholdSeed != null && structureSet.is(net.minecraft.world.level.levelgen.structure.BuiltinStructureSets.STRONGHOLDS)) {
+-            random.setSeed(this.conf.strongholdSeed);
+-        } else {
+-        // Paper end - Add missing structure set seed configs
+-        random.setSeed(this.concentricRingsSeed);
+-        } // Paper - Add missing structure set seed configs
++            ringSeed = this.conf.strongholdSeed;
++        }
++        String structureSetKey = structureSet.unwrapKey()
++            .map(key -> key.identifier().toString())
++            .orElse("unkeyed:concentric-rings:" + placement.salt + ":" + placement.distance() + ":" + placement.spread() + ":" + placement.count());
++        random.setSeed(io.papermc.paper.configuration.Folia2b2tConfiguration.protectedStructureSeed(this.levelSeed, structureSetKey, ringSeed)); // Paper - Add missing structure set seed configs; SeedShield
+         double angle = random.nextDouble() * Math.PI * 2.0;
+         int positionInCircle = 0;
+         int circle = 0;
+
+diff --git a/net/minecraft/world/level/levelgen/structure/placement/RandomSpreadStructurePlacement.java b/net/minecraft/world/level/levelgen/structure/placement/RandomSpreadStructurePlacement.java
+--- a/net/minecraft/world/level/levelgen/structure/placement/RandomSpreadStructurePlacement.java
++++ b/net/minecraft/world/level/levelgen/structure/placement/RandomSpreadStructurePlacement.java
+@@ -68,7 +68,10 @@
+         int spacedGridX = Math.floorDiv(sourceX, this.spacing);
+         int spacedGridZ = Math.floorDiv(sourceZ, this.spacing);
+         WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+-        random.setLargeFeatureWithSalt(seed, spacedGridX, spacedGridZ, this.salt());
++        int placementSalt = this instanceof net.minecraft.world.level.chunk.ChunkGeneratorStructureState.KeyedRandomSpreadStructurePlacement keyed
++            ? keyed.seedShieldSalt(seed)
++            : this.salt();
++        random.setLargeFeatureWithSalt(seed, spacedGridX, spacedGridZ, placementSalt);
+         int limit = this.spacing - this.separation;
+         int spreadX = this.spreadType.evaluate(random, limit);
+         int spreadZ = this.spreadType.evaluate(random, limit);
+
+diff --git a/net/minecraft/world/level/levelgen/structure/placement/StructurePlacement.java b/net/minecraft/world/level/levelgen/structure/placement/StructurePlacement.java
+--- a/net/minecraft/world/level/levelgen/structure/placement/StructurePlacement.java
++++ b/net/minecraft/world/level/levelgen/structure/placement/StructurePlacement.java
+@@ -96,13 +96,28 @@
+         }
+         // Paper end - Add missing structure set seed configs
+         return this.isPlacementChunk(state, sourceX, sourceZ)
+-            && this.applyAdditionalChunkRestrictions(sourceX, sourceZ, state.getLevelSeed(), saltOverride) // Paper - Add missing structure set seed configs
++            && this.applyAdditionalChunkRestrictions(sourceX, sourceZ, state.getLevelSeed(), saltOverride, structureSetKey) // Paper - Add missing structure set seed configs
+             && this.applyInteractionsWithOtherStructures(state, sourceX, sourceZ);
+     }
+ 
+     // Paper start - Add missing structure set seed configs
+     public boolean applyAdditionalChunkRestrictions(final int sourceX, final int sourceZ, final long levelSeed, final @org.jspecify.annotations.Nullable Integer saltOverride) {
+-        return !(this.frequency < 1.0F) || this.frequencyReductionMethod.shouldGenerate(levelSeed, this.salt, sourceX, sourceZ, this.frequency, saltOverride);
++        return this.applyAdditionalChunkRestrictions(sourceX, sourceZ, levelSeed, saltOverride, null);
++    }
++
++    public boolean applyAdditionalChunkRestrictions(final int sourceX, final int sourceZ, final long levelSeed, final @org.jspecify.annotations.Nullable Integer saltOverride, final net.minecraft.resources.@org.jspecify.annotations.Nullable ResourceKey<StructureSet> structureSetKey) {
++        final String effectiveKey = structureSetKey != null
++            ? structureSetKey.identifier().toString()
++            : this instanceof ChunkGeneratorStructureState.KeyedRandomSpreadStructurePlacement keyed ? keyed.seedShieldKey : null;
++        final boolean protectSeed = io.papermc.paper.configuration.Folia2b2tConfiguration.structureSeedProtectionEnabled() && effectiveKey != null;
++        final int placementSalt = protectSeed
++            ? io.papermc.paper.configuration.Folia2b2tConfiguration.protectedStructureSalt(levelSeed, effectiveKey, this.salt)
++            : this.salt;
++        final int frequencySalt = protectSeed
++            ? io.papermc.paper.configuration.Folia2b2tConfiguration.protectedStructureSalt(levelSeed, effectiveKey, saltOverride != null ? saltOverride : this.salt)
++            : (saltOverride != null ? saltOverride : this.salt);
++        final Integer frequencySaltOverride = protectSeed ? Integer.valueOf(frequencySalt) : saltOverride;
++        return !(this.frequency < 1.0F) || this.frequencyReductionMethod.shouldGenerate(levelSeed, placementSalt, sourceX, sourceZ, this.frequency, frequencySaltOverride);
+         // Paper end - Add missing structure set seed configs
+     }
+ 
+@@ -143,11 +158,15 @@
+     }
+ 
+     private static boolean legacyPillagerOutpostReducer(final long seed, final int salt, final int sourceX, final int sourceZ, final float probability, final @org.jspecify.annotations.Nullable Integer saltOverride) { // Paper - Add missing structure set seed configs; ignore here
+-        int cx = sourceX >> 4;
+-        int cz = sourceZ >> 4;
+-        WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+-        random.setSeed(cx ^ cz << 4 ^ seed);
+-        random.nextInt();
++        WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
++        if (io.papermc.paper.configuration.Folia2b2tConfiguration.structureSeedProtectionEnabled() && saltOverride != null) {
++            random.setLargeFeatureWithSalt(seed, sourceX, sourceZ, saltOverride);
++        } else {
++            int cx = sourceX >> 4;
++            int cz = sourceZ >> 4;
++            random.setSeed(cx ^ cz << 4 ^ seed);
++            random.nextInt();
++        }
+         return random.nextInt((int)(1.0F / probability)) == 0;
+     }
+ 
